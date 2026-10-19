@@ -1,0 +1,28 @@
+# 依赖
+node_modules/
+
+# 运行时状态与数据库（不入库：含真实聊天记录）
+data/
+qq-mcp/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# 群友隐私数据（按 QQ 号存储的记忆档案）
+memory/
+
+# 内部工作记录：交班日志与设计/审计报告，不随公开仓库发布
+HANDOFF.md
+docs/reports/
+
+# 缓存与临时产物
+qq-mcp/cache/
+.codex-debug-stage/
+t-out.txt
+t-err.txt
+test-out.txt
+test-err.txt
+
+# 手工备份（已由 git 历史取代）
+*.bak
+*.bak-*

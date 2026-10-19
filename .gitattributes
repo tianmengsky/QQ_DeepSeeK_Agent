@@ -1,0 +1,9 @@
+# 行尾统一为 LF：本机 core.autocrlf=true 会把检出改成 CRLF，
+# 而 .bat 启动器与 Node 源文件当前都是 LF，显式固定可避免无意义的整文件改写。
+* text=auto eol=lf
+
+# 二进制，禁止任何换行转换
+*.png binary
+*.sqlite3 binary
+*.sqlite3-wal binary
+*.sqlite3-shm binary

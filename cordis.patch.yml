@@ -1,0 +1,37 @@
+# dsh-qq-bridge bundle patch.
+#
+# The bundle layer inserts one Host row. Values here are the shipped defaults;
+# override any of them from the profile's own cordis.patch.yml by matching the
+# entry id `qq-bridge`.
+- insert:
+    - id: qq-bridge
+      name: 'dsh-qq-bridge'
+      config:
+        # --- ingress: where OneBot posts events -------------------------------
+        path: /qq/onebot
+        token: ''
+        maxBodyBytes: 1048576
+
+        # --- egress: how the bridge talks back through SnowLuma ---------------
+        onebotHttp: 'http://127.0.0.1:3000'
+        onebotToken: ''
+
+        # --- the session each QQ conversation runs in -------------------------
+        cwd: 'D:\作业\计算机组成原理'
+        agentPreset: ''
+        rotateEveryTurns: 20
+
+        # --- who may talk to the agent ----------------------------------------
+        groups: []
+        users: []
+        groupEnabled: true
+        privateEnabled: true
+        groupTrigger: at
+        groupPrefix: ''
+        selfIds: []
+
+        # --- reply handling ---------------------------------------------------
+        replyTimeoutMs: 180000
+        maxReplyChars: 1500
+        replyToGroups: true
+        awakeMs: 60000

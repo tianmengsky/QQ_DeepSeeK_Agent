@@ -1,0 +1,22 @@
+{
+  "name": "qq-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal MCP server that lets an agent send QQ messages through the OneBot v11 HTTP API (SnowLuma).",
+  "main": "src/index.js",
+  "bin": {
+    "qq-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=24.10.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.35.5"
+  }
+}
