@@ -136,7 +136,9 @@ try {
     const cfg = config({ stickerCatalogPath: file, stickerCatalogLimit: 2 });
     const lines = stickerInstructionLines(cfg, '难过', () => 0.99).join('\n');
     assert.match(lines, /#93 吃饭\n#92 开心得意/);
-    assert.match(lines, /\[表情:93\]/);
+    assert.match(lines, /\[表情:编号\]/);
+    // 以前这里给的是第一个候选的真实编号，模型会照抄，等于替它挑了一张没选过的图。
+    assert.doesNotMatch(lines, /\[表情:\d+\]/);
     assert.doesNotMatch(lines, /#91|干饭碗/);
     assert.match(stickerInstructionLines(cfg, '难过', () => 0).join('\n'), /#91 难过哭泣\n#92 开心得意/);
     assert.equal(stickerInstructionLines({ ...cfg, stickerCatalogLimit: 4 }).filter(line => line.startsWith('#')).length, 3);
@@ -159,12 +161,21 @@ try {
       assert.ok(prompt.indexOf('【你的表情包·本轮候选】') > prompt.indexOf('【本轮发送规则】'));
       assert.ok(prompt.indexOf('【你的表情包·本轮候选】') < prompt.indexOf('—— 现在这条消息 ——'));
     }
+    // 表情偏好写在人设/行为卡里，属于静态块：只在首轮出现，后续轮不该重复注入。
+    assert.match(first, /轻松闲聊、接梗或情绪回应时，?优先考虑贴题的(?:收藏表情|表情包)，?其次考虑 Emoji/);
+    assert.doesNotMatch(later, /轻松闲聊、接梗或情绪回应时/);
     assert.match(first, /#101 真实表情0/);
     assert.match(first, /#108 真实表情7/);
     assert.match(later, /#108 真实表情7/);
     assert.doesNotMatch(later, /【怎么说话】|\[你的人设\]/);
     const disabled = buildPrompt(message(13), config({ stickerHints: false, stickerCatalogPath: file }), { includeStatic: false });
     assert.doesNotMatch(disabled, /【你的表情包·本轮候选】|#10[1-8] /);
+  });
+  await test('soft sticker preference favors relevant stickers without making them mandatory', () => {
+    const first = buildPrompt(message(19, '来接梗'), config({ ...cards, stickerHints: true }), { includeStatic: true });
+    assert.match(first, /轻松闲聊、接梗或情绪回应时，?优先考虑贴题的(?:收藏表情|本轮候选)/);
+    assert.match(first, /表情是可选表达/);
+    assert.doesNotMatch(first, /每轮必须|至少一个|必须使用/);
   });
 } finally {
   globalThis.fetch = realFetch;

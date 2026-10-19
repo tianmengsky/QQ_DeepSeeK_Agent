@@ -92,6 +92,7 @@
 | `QQ_LIBRARY_TOTAL_MIB` | `256` | 全局图库容量上限 |
 | `QQ_STICKER_COOLDOWN_SECONDS` | `120` | 发过的图多久内不再进候选 |
 | `QQ_MAX_IMAGE_BYTES` | `6291456` | 单张图大小上限（收藏时） |
+| `QQ_STICKER_CATALOG` | `cache/catalog.json` | 收藏表情文字目录（编号 + 描述 + 身份键） |
 | `QQ_ACTIVE_CONVERSATION_TTL_MS` | `300000` | `qq_say` 认的"当前会话"标记多久算过期 |
 
 **建议至少配一个白名单。** 不限制意味着 Agent 能给任何好友/群发消息。
@@ -124,6 +125,17 @@ QQ_CAPABILITIES=send_text,send_sticker,poke,read_requests
 
 配额和收藏表情读取是**分开**的 —— 它们的敏感度和成本都不一样。
 配额是**持久**的：进程重启不会把额度清零。
+
+### 收藏表情编号（`cache/catalog.json`）
+
+`qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face`
+里的编号来自文字目录，**不是** `fetch_custom_face` 列表里的下标。原因：QQ 返回的顺序会整份翻转
+（2026-10-19 实测，`#73 得意指着人` 实际发成了 `#22 我死，我死，我死…`）。
+目录每一行都带 `key`（qpic URL 里的 32 位哈希），发送/看图时按 `key` 到当前列表里找 URL
+（`lib/domain/stickers.mjs`，与桥接共用一份算法）。顺序翻转不影响结果；
+目录里有、收藏里已经没有的那张会直接报错，不会退回按位置猜一张。
+
+目录由 `tools/make-sheets.mjs` 导出总览图、标注后，用 `tools/sync-catalog.mjs` 按编号补上 `key`。
 
 ### 申请收件箱（`QQ_BRIDGE_DB`）
 

@@ -382,6 +382,40 @@ await test('B22 sticker-only success updates cooldown; replay is not another sen
   assert.equal(await __test.deliverReply(r.ctx, r.config, o), false);
   assert.equal(r.stats.stickersSent, 1);
 });
+await test('B22b 收藏顺序翻转后，[表情:N] 仍发目录里那一条（按身份键，不按位置）', async () => {
+  const catalogFile = path.join(root, 'flipped-catalog.json');
+  const face = (token) => `https://p.qpic.cn/qq_expression/1/1_0_0_0_${token}_0_0/0`;
+  const want = face('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+  const other = face('BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB');
+  fs.writeFileSync(catalogFile, JSON.stringify([
+    { n: 1, desc: '得意指着人', key: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+  ]));
+  const r = rig({ stickerCatalogPath: catalogFile }, '', db());
+  const inner = globalThis.fetch;
+  // 现场就是这样：列表把 want 排到了第二位（整份倒序），按位置取第 1 个会发成 other。
+  globalThis.fetch = async (url, init) => {
+    if (String(url).split('/').pop() === 'fetch_custom_face') {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ status: 'ok', retcode: 0, data: [other, want] }),
+      };
+    }
+    return inner(url, init);
+  };
+  try {
+    await __test.deliverReply(r.ctx, r.config, { ...opts(r), reply: '[表情:1]', turnId: 'flipped' });
+  } finally {
+    globalThis.fetch = inner;
+  }
+  const sent = r.calls.filter((c) => c.action === 'send_group_msg').at(-1);
+  assert.equal(
+    sent?.payload?.message?.[0]?.data?.file,
+    want,
+    '编号 #1 必须发目录里那一条，而不是当前列表第一个',
+  );
+});
 await test('B23 queued turn stops when disabled through control route', async () => {
   const r = rig();
   let unblock;

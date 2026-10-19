@@ -8,6 +8,7 @@ import { workspaceRoot, WORKSPACE_STATE_KEY, workspaceAction, readWorkspaceFile,
 import { recordFileProgress } from '../../lib/agent/file-progress.mjs';
 import { assertExecutionSource, crossConversationAllowed } from '../../lib/agent/execution-scope.mjs';
 import { checkToolFloor } from '../../lib/conversation/floor.mjs';
+import { faceKeyOf, findFaceUrlByKey } from '../../lib/domain/stickers.mjs';
 /**
  * qq-mcp — 让 Agent 通过 SnowLuma 提供的 OneBot v11 HTTP 接口在 QQ 里发消息。
  *
@@ -510,13 +511,20 @@ function pickCustomFace(urls, index) {
 }
 
 /**
- * 表情文字目录（编号 → 一句描述）。
+ * 表情文字目录（编号 → 一句描述 + 身份键）。
  *
  * 由 tools/make-sheets.mjs 导出总览图、再人工/子代理标注生成，
  * 存成 cache/catalog.json。有它之后，Agent 不用看图就能按情绪挑编号——
  * 这是「主动发表情包」能不能成立的关键：看图太贵，模型会直接放弃。
+ *
+ * ⚠️ 编号只是**目录里的名字**，不能当列表位置用：QQ 收藏列表的顺序会翻
+ * （2026-10-19 实测整份倒序，于是 `#73 得意` 实际发出的是 `#22 我死我死…`）。
+ * 所以每行都带 key（这张表情自己的哈希，见 lib/domain/stickers.mjs），
+ * 发送时按 key 去当前列表里找 URL。
  */
-const CATALOG_PATH = path.join(import.meta.dirname, '..', 'cache', 'catalog.json');
+const CATALOG_PATH =
+  (process.env.QQ_STICKER_CATALOG ?? '').trim() ||
+  path.join(import.meta.dirname, '..', 'cache', 'catalog.json');
 
 function loadStickerCatalog() {
   try {
@@ -526,7 +534,8 @@ function loadStickerCatalog() {
     const map = new Map();
     for (const row of parsed) {
       const n = Number(row?.n);
-      if (Number.isInteger(n) && typeof row.desc === 'string') map.set(n, row.desc);
+      if (!Number.isInteger(n) || typeof row?.desc !== 'string') continue;
+      map.set(n, { n, desc: row.desc, key: typeof row.key === 'string' ? row.key.trim() : '' });
     }
     return map.size ? map : null;
   } catch {
@@ -535,10 +544,38 @@ function loadStickerCatalog() {
 }
 
 /**
+ * 编号 → 当前收藏列表里的 URL。
+ *
+ * 有身份键就按身份键找；找不到就明确报错 —— 不退回按位置猜一张，
+ * 发错图比不发表情更糟。只有目录缺失（或这一行没有 key）时才退回旧的位置取法。
+ */
+async function resolveCustomFace(index) {
+  const n = Number(index);
+  const catalog = loadStickerCatalog();
+  const row = catalog?.get(n) ?? null;
+  const urls = await fetchCustomFaces();
+  if (row?.key) {
+    const url = findFaceUrlByKey(urls, row.key);
+    if (!url) {
+      throw new Error(
+        `收藏表情 #${n}（${row.desc}）已经不在当前收藏里（可能被删除或替换）；` +
+          `先用 qq_list_custom_faces 确认现有编号。`,
+      );
+    }
+    return { url, index: n, desc: row.desc };
+  }
+  const picked = pickCustomFace(urls, n);
+  return { ...picked, desc: row?.desc ?? '' };
+}
+
+/**
  * 把一批收藏表情拼成一张带编号的总览图。
  *
  * 为什么要这个：逐张 qq_view_custom_face 看上百张太贵，模型会干脆不看，
  * 于是「列得出清单但不知道长什么样」。拼成一张图，一眼看全，成本只有一张图。
+ *
+ * 入参是 `[{ url, num }]`，`num` 是**目录编号**（不是列表第几个）：
+ * 顺序翻转时按位置贴标签，模型就会照着错的号去挑图。
  */
 const SHEET_COLS = 8;
 const SHEET_CELL = 170;
@@ -546,17 +583,18 @@ const SHEET_LABEL = 24;
 const SHEET_PAD = 6;
 const SHEET_PER_PAGE = 40;
 
-async function buildContactSheet(urls, page) {
+async function buildContactSheet(entries, page) {
   const perPage = SHEET_PER_PAGE;
-  const totalPages = Math.max(1, Math.ceil(urls.length / perPage));
+  const totalPages = Math.max(1, Math.ceil(entries.length / perPage));
   const p = Math.min(Math.max(1, Number(page) || 1), totalPages);
   const start = (p - 1) * perPage;
-  const slice = urls.slice(start, start + perPage);
+  const slice = entries.slice(start, start + perPage);
 
   const raws = await Promise.all(
-    slice.map(async (u) => {
+    slice.map(async (entry) => {
+      if (!entry.url) return null;
       try {
-        const r = await fetch(u, { signal: AbortSignal.timeout(20000) });
+        const r = await fetch(entry.url, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) return null;
         return Buffer.from(await r.arrayBuffer());
       } catch {
@@ -576,7 +614,7 @@ async function buildContactSheet(urls, page) {
     const row = Math.floor(i / SHEET_COLS);
     const x = SHEET_PAD + col * (SHEET_CELL + SHEET_PAD);
     const y = SHEET_PAD + row * (SHEET_CELL + SHEET_LABEL + SHEET_PAD);
-    const num = start + i + 1;
+    const num = slice[i]?.num ?? null;
 
     if (raws[i]) {
       try {
@@ -597,7 +635,7 @@ async function buildContactSheet(urls, page) {
     const label = Buffer.from(
       `<svg width="${SHEET_CELL}" height="${SHEET_LABEL}" xmlns="http://www.w3.org/2000/svg">` +
         `<rect width="${SHEET_CELL}" height="${SHEET_LABEL}" fill="#0f0f12"/>` +
-        `<text x="4" y="17" font-family="Consolas,monospace" font-size="15" fill="#e6e6eb">#${num}</text>` +
+        `<text x="4" y="17" font-family="Consolas,monospace" font-size="15" fill="#e6e6eb">${num === null ? '新增' : '#' + num}</text>` +
         `</svg>`,
     );
     composites.push({ input: label, left: x, top: y + SHEET_CELL });
@@ -615,7 +653,27 @@ async function buildContactSheet(urls, page) {
     .png({ compressionLevel: 9 })
     .toBuffer();
 
-  return { buffer: sheet, page: p, totalPages, from: start + 1, to: start + slice.length, drawn };
+  return { buffer: sheet, page: p, totalPages, from: start + 1, to: start + slice.length, drawn, total: entries.length };
+}
+
+/**
+ * 总览图要画的条目：目录编号 + 当前收藏里的 URL。
+ *
+ * 目录行按编号排序（编号稳定），新收藏（还没编号）排在最后、标签写「新增」——
+ * 它们的编号要等重新生成目录后才有，绝不临时编一个可能撞号的数字。
+ */
+async function customFaceSheetEntries() {
+  const urls = await fetchCustomFaces();
+  const catalog = loadStickerCatalog();
+  if (!catalog) return urls.map((url) => ({ url, num: null }));
+  const urlByKey = new Map(urls.map((url) => [faceKeyOf(url), url]));
+  const entries = [...catalog.values()]
+    .sort((a, b) => a.n - b.n)
+    .map((row) => ({ url: row.key ? urlByKey.get(row.key) ?? '' : '', num: row.n }))
+    .filter((entry) => entry.url);
+  const known = new Set([...catalog.values()].map((row) => row.key).filter(Boolean));
+  for (const url of urls) if (!known.has(faceKeyOf(url))) entries.push({ url, num: null });
+  return entries;
 }
 
 // ---------------------------------------------------------------- 工具定义
@@ -1841,27 +1899,39 @@ async function handle(name, args = {}) {
       }
       const catalog = loadStickerCatalog();
       const from = Math.max(1, Number(args.from) || 1);
-      const to = Math.min(urls.length, Number(args.to) || urls.length);
+      const to = Number(args.to) || Number.MAX_SAFE_INTEGER;
 
       if (catalog) {
-        const lines = [];
-        for (let i = from; i <= to; i += 1) {
-          lines.push(`#${i}  ${catalog.get(i) ?? '（未描述）'}`);
-        }
+        /**
+         * 编号 = 目录里的名字；讲解时按编号升序（不是列表位置）。
+         * 已经从收藏里删掉的行跳过编号，但要说一声，免得模型以为漏了。
+         */
+        const rows = [...catalog.values()].sort((a, b) => a.n - b.n);
+        const live = new Set(urls.map((url) => faceKeyOf(url)));
+        const present = rows.filter((row) => !row.key || live.has(row.key));
+        const gone = rows.length - present.length;
+        const known = new Set(rows.map((row) => row.key).filter(Boolean));
+        const unlisted = urls.filter((url) => !known.has(faceKeyOf(url))).length;
+        const page = present.filter((row) => row.n >= from && row.n <= to);
+        const lines = page.map((row) => `#${row.n}  ${row.desc}`);
+        const head = page.length ? `#${page[0].n}~#${page[page.length - 1].n}` : '（这一段没有编号）';
         return ok(
-          `当前账号收藏表情共 ${urls.length} 张，本次列出 #${from}~#${to}：\n` +
-            lines.join('\n') +
-            `\n\n挑好用 qq_send_custom_face 传编号发出去。` +
-            (from > 1 || to < urls.length
-              ? `\n（其余用 from/to 参数翻页，例如 from=41&to=80）`
+          `当前账号收藏表情共 ${urls.length} 张，目录 ${rows.length} 条，本次列出 ${head}：\n` +
+            (lines.length ? lines.join('\n') : '（无）') +
+            `\n\n编号是目录里的名字，发送时按表情本身匹配，收藏顺序变化不影响。` +
+            `挑好用 qq_send_custom_face 传编号发出去。` +
+            (gone ? `\n（有 ${gone} 张目录里的表情已不在收藏里，编号跳过。）` : '') +
+            (unlisted
+              ? `\n（另有 ${unlisted} 张新收藏还没有编号：重新跑 tools/make-sheets.mjs 标注后用 tools/sync-catalog.mjs 补目录。）`
               : ''),
         );
       }
 
+      const capped = Math.min(urls.length, to);
       const lines = [];
-      for (let i = from; i <= to; i += 1) lines.push(`#${i}\t${urls[i - 1]}`);
+      for (let i = from; i <= capped; i += 1) lines.push(`#${i}\t${urls[i - 1]}`);
       return ok(
-        `当前账号收藏表情共 ${urls.length} 张（暂无文字目录，以下是原始 URL），本次列出 #${from}~#${to}：\n` +
+        `当前账号收藏表情共 ${urls.length} 张（暂无文字目录，以下是原始 URL），本次列出 #${from}~#${capped}：\n` +
           lines.join('\n'),
       );
     }
@@ -1869,18 +1939,19 @@ async function handle(name, args = {}) {
     case 'qq_custom_face_sheet': {
       // 拼图要真去下载那么多张图，成本比"列清单"高得多，所以单列一条额度
       guardImageQuota();
-      const urls = await fetchCustomFaces();
-      if (!urls.length) {
+      const entries = await customFaceSheetEntries();
+      if (!entries.length) {
         return ok('当前账号的收藏表情是空的，没有可拼的图。');
       }
-      const sheet = await buildContactSheet(urls, args.page);
+      const sheet = await buildContactSheet(entries, args.page);
       return {
         content: [
           {
             type: 'text',
             text:
               `收藏表情总览 第 ${sheet.page}/${sheet.totalPages} 页，` +
-              `本页 #${sheet.from}~#${sheet.to}（共 ${urls.length} 张，成功绘制 ${sheet.drawn} 张）。` +
+              `本页第 ${sheet.from}~${sheet.to} 条（共 ${sheet.total} 条，成功绘制 ${sheet.drawn} 张）。` +
+              `标签是目录编号（「新增」= 还没编号的新收藏）。` +
               `看中哪张就用 qq_send_custom_face 按编号发出去。`,
           },
           { type: 'image', data: sheet.buffer.toString('base64'), mimeType: 'image/png' },
@@ -1890,15 +1961,17 @@ async function handle(name, args = {}) {
 
     case 'qq_view_custom_face': {
       guardImageQuota();
-      const urls = await fetchCustomFaces();
-      const { url, index } = pickCustomFace(urls, args.index);
+      const { url, index, desc } = await resolveCustomFace(args.index);
       const response = await fetch(url, { signal: AbortSignal.timeout(20000) });
       if (!response.ok) throw new Error(`取图失败：HTTP ${response.status}`);
       const buffer = Buffer.from(await response.arrayBuffer());
       const mediaType = (response.headers.get('content-type') ?? 'image/png').split(';')[0].trim();
       return {
         content: [
-          { type: 'text', text: `收藏表情 #${index}（${Math.round(buffer.length / 1024)}KB）` },
+          {
+            type: 'text',
+            text: `收藏表情 #${index}${desc ? '「' + desc + '」' : ''}（${Math.round(buffer.length / 1024)}KB）`,
+          },
           { type: 'image', data: buffer.toString('base64'), mimeType: mediaType },
         ],
       };
@@ -1906,8 +1979,7 @@ async function handle(name, args = {}) {
 
     case 'qq_send_custom_face': {
       assertCapability('send_sticker');
-      const urls = await fetchCustomFaces();
-      const { url, index } = pickCustomFace(urls, args.index);
+      const { url, index, desc } = await resolveCustomFace(args.index);
       const hasGroup = Number.isSafeInteger(args.group_id);
       const hasUser = Number.isSafeInteger(args.user_id);
       if (hasGroup === hasUser) {
@@ -1925,7 +1997,10 @@ async function handle(name, args = {}) {
         : await sendMessage('user', 'user_id', args.user_id, { message: segments }, faceOpts);
       return {
         ...result,
-        content: [...result.content, { type: 'text', text: `（收藏表情 #${index}，发送状态以回执为准）` }],
+        content: [
+          ...result.content,
+          { type: 'text', text: `（收藏表情 #${index}${desc ? '「' + desc + '」' : ''}，发送状态以回执为准）` },
+        ],
       };
     }
 

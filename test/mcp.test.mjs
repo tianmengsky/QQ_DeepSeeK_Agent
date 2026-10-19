@@ -216,7 +216,9 @@ function startFakeOnebot() {
         return reply({ message: [{ type: 'forward', data: { id: 'quoted-forward' } }] });
       }
       if (action === 'fetch_custom_face') {
-        return reply([`http://127.0.0.1:${server.address().port}/face/1.png`]);
+        return reply(
+          onebot.faces ?? [`http://127.0.0.1:${server.address().port}/face/1.png`],
+        );
       }
       if (params.message === 'timeout-regression') {
         setTimeout(() => reply({ message_id: calls.length }), 800);
@@ -249,7 +251,7 @@ function startFakeOnebot() {
     server.listen(0, '127.0.0.1', () => {
       // 也提供一个可下载的假 PNG，供图库收藏测试用
       server.on('request', () => {});
-      resolve({ server, calls, self, group, port: server.address().port });
+      resolve({ server, calls, self, group, port: server.address().port, faces: null });
     });
   });
 }
@@ -354,7 +356,16 @@ class McpClient {
 /** 起一个配好环境变量的 qq-mcp 子进程。 */
 function startMcp(env) {
   const child = spawn(process.execPath, [path.join(process.cwd(), 'qq-mcp', 'src', 'index.js')], {
-    env: { ...process.env, ...env },
+    env: {
+      ...process.env,
+      /**
+       * 默认**不要**读仓库里那份真实表情目录：它是本机账号的私有数据，
+       * 让测试读到会让断言随账号变化漂移（"#1 是哪张图"根本不确定）。
+       * 需要目录的用例显式传 QQ_STICKER_CATALOG。
+       */
+      QQ_STICKER_CATALOG: path.join(tmpDir(), 'no-catalog.json'),
+      ...env,
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const stderr = [];
@@ -1492,6 +1503,67 @@ await test('qq_status 的自己的昵称也是实时读的', async () => {
     assert.match(res.text, /昵称实时读取/);
   } finally {
     onebot.self.nickname = '测试鲸鱼';
+    client.kill();
+  }
+});
+
+console.log('\nqq-mcp: 收藏表情按身份匹配（顺序可能翻转）');
+await test('收藏列表顺序与目录相反时，编号仍指向目录里那张图', async () => {
+  const dir = tmpDir();
+  const catalog = path.join(dir, 'catalog.json');
+  const first = `http://127.0.0.1:${onebot.port}/img/face-a.png`;
+  const second = `http://127.0.0.1:${onebot.port}/img/face-b.png`;
+  // 目录 #1 是 second 那张；当前列表却把 second 排在第二位（2026-10-19 的现场）。
+  fs.writeFileSync(catalog, JSON.stringify([
+    { n: 1, desc: '得意指着人', key: second },
+    { n: 2, desc: '我死，我死，我死…', key: first },
+  ]));
+  onebot.faces = [first, second];
+  const client = startMcp({
+    ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`,
+    QQ_STATE_DIR: dir,
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: '*',
+    QQ_STICKER_CATALOG: catalog,
+  });
+  try {
+    await client.init();
+    const list = await client.call('qq_list_custom_faces');
+    assert.equal(list.isError, false, list.text);
+    assert.match(list.text, /#1 {2}得意指着人/);
+    assert.match(list.text, /#2 {2}我死，我死，我死…/);
+
+    const before = onebot.calls.length;
+    const sent = await client.call('qq_send_custom_face', { group_id: 111, index: 1 });
+    assert.equal(sent.isError, false, sent.text);
+    const call = onebot.calls.slice(before).find((c) => c.action === 'send_group_msg');
+    const file = call.params.message.find((seg) => seg.type === 'image').data.file;
+    assert.equal(file, second, '按编号 #1 发出去的必须是目录里那一条，不是列表第一个');
+  } finally {
+    onebot.faces = null;
+    client.kill();
+  }
+});
+await test('目录里的表情被删掉时明确报错，不退回按位置猜一张', async () => {
+  const dir = tmpDir();
+  const catalog = path.join(dir, 'catalog.json');
+  const live = `http://127.0.0.1:${onebot.port}/img/face-c.png`;
+  fs.writeFileSync(catalog, JSON.stringify([{ n: 1, desc: '已经被删的那张', key: 'DELETED' }]));
+  onebot.faces = [live];
+  const client = startMcp({
+    ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`,
+    QQ_STATE_DIR: dir,
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: '*',
+    QQ_STICKER_CATALOG: catalog,
+  });
+  try {
+    await client.init();
+    const result = await client.call('qq_send_custom_face', { group_id: 111, index: 1 });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /不在当前收藏里/);
+  } finally {
+    onebot.faces = null;
     client.kill();
   }
 });
