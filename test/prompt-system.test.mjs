@@ -140,7 +140,7 @@ try {
     assert.match(stickerInstructionLines(cfg, '难过', () => 0).join('\n'), /#91 难过哭泣\n#92 开心得意/);
     assert.equal(stickerInstructionLines({ ...cfg, stickerCatalogLimit: 4 }).filter(line => line.startsWith('#')).length, 3);
   });
-  await test('later turns refresh four sticker candidates next to the current message while static cards stay omitted', async () => {
+  await test('later turns refresh eight sticker candidates next to the current message while static cards stay omitted', async () => {
     const file = path.join(root, 'dynamic-catalog.json');
     fs.writeFileSync(file, JSON.stringify(Array.from({ length: 8 }, (_, i) => ({ n: 101 + i, desc: `真实表情${i}` }))));
     const r = rig({ ...cards, stickerHints: true, stickerCatalogPath: file }, '[SKIP]');
@@ -154,14 +154,14 @@ try {
     const first = r.prompts[0].content[0].text, later = r.prompts[1].content[0].text;
     for (const prompt of [first, later]) {
       assert.match(prompt, /【你的表情包·本轮候选】/);
-      assert.equal((prompt.match(/^#\d+ /gm) ?? []).length, 4);
+      assert.equal((prompt.match(/^#\d+ /gm) ?? []).length, 8);
       assert.ok(prompt.indexOf('【你的表情包·本轮候选】') > prompt.indexOf('【本轮发送规则】'));
       assert.ok(prompt.indexOf('【你的表情包·本轮候选】') < prompt.indexOf('—— 现在这条消息 ——'));
     }
     assert.match(first, /#101 真实表情0/);
-    assert.doesNotMatch(first, /#108 /);
+    assert.match(first, /#108 真实表情7/);
     assert.match(later, /#108 真实表情7/);
-    assert.doesNotMatch(later, /#101 |【怎么说话】|\[你的人设\]/);
+    assert.doesNotMatch(later, /【怎么说话】|\[你的人设\]/);
     const disabled = buildPrompt(message(13), config({ stickerHints: false, stickerCatalogPath: file }), { includeStatic: false });
     assert.doesNotMatch(disabled, /【你的表情包·本轮候选】|#10[1-8] /);
   });

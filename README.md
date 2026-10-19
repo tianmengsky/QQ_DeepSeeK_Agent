@@ -4,6 +4,10 @@
 
 2026-10-19 `v83-compact-dynamic-context`：每轮动态 prompt 改为按需注入。普通群聊省略绝对工作区路径，文件/任务回合和私聊仍提供；唤醒、时间线、工具回执、表情、记忆及任务信息按场景保留。工具安全所需的会话、`source_ref`、消息 ID 和执行归属字段不省略。
 
+2026-10-19 每轮动态注入的收藏表情候选由 4 条增至 8 条；源码默认值和 desktop profile 同步调整，目录不足 8 条时仍展示全部。
+
+2026-10-19 Emoji 提示词精简：移除人设卡中的“连续两轮最多一次”和重复的情绪映射表；人设与行为卡统一说明 Emoji/收藏表情可按语境自然选择，不设固定频率。静态协议仅保留实际输出格式，动态候选不再重复格式示范。
+
 2026-10-19 合并转发主动分页阅读：新增 QQ 工具 `qq_read_forward`（能力位 `read_forward`）。提示词首批内容仍按 20 条/6000 字符预算展开；若还有未展开节点，Agent 可沿本轮 `source_ref`、`forward_id` 和 `next_offset` 逐页读取，每页最多 20 条。工具会核对转发 ID 来自当前消息或其引用消息，并限制在当前会话，避免任意读取或一次性撑满上下文。当前 QQ 预设已授予 `read_forward`，连接使用 SnowLuma。
 
 2026-10-19 合并转发引用修复：引用消息中的 `forward` 段现在按引用图片的激发逻辑读取，默认调用 `get_forward_msg`；纯转发、文字触发、批次引用、清醒期和注意力闸门都不会漏掉它。读取结果按 `forwardMaxMessages: 20`、`forwardMaxChars: 6000` 截断后交给 Agent，失败保留明确占位。`forwardMode: 'always'` 每次展开，`forwardMode: 'never'` 永不展开；可调整 `forwardTimeoutMs`、`forwardTriggers` 和 `attachQuotedForwards`。
@@ -1140,8 +1144,8 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 | `rotateAfterImage` | `false` | 显式打开后，附图会导致下一轮提前创建 Session |
 | `toneAnchor` | 空 | 每轮末尾补的一句短语气锚（默认空，语气只由 `persona.md` 决定）|
 
-desktop profile 把 `stickerCatalogLimit` 设为 `4`（源码默认也是 4）：每轮动态注入时，
-从真实目录无放回随机抽 4 条，放在当前消息前；目录不足 4 条时展示全部，每轮独立抽样允许跨轮重复，更大目录按工具查询。QQ 托管使用 `qq-hosted` 的
+desktop profile 把 `stickerCatalogLimit` 设为 `8`（源码默认也是 8）：每轮动态注入时，
+从真实目录无放回随机抽 8 条，放在当前消息前；目录不足 8 条时展示全部，每轮独立抽样允许跨轮重复，更大目录按工具查询。QQ 托管使用 `qq-hosted` 的
 `QQ_TOOLSET=chat,admin`，向模型暴露聊天、表情、历史、可靠性工具，**以及群管理与
 改自己资料/申请处理这一档**（2026-10-12 起；可写多个集合，用逗号分隔，写错集合名会
 退回全量并打日志）。工具执行权限仍由 `QQ_CAPABILITIES` 单独控制 —— **可见 ≠ 可执行**。
@@ -1179,7 +1183,7 @@ RARS/Office 工具。过滤只作用于 QQ 预设；其他会话的全局工具�
 
 DSH 的 agent loop 在每个模型步骤派生并发送系统提示词、全部未被压缩的会话历史和当前工具 schema；普通桥接 prompt 是追加到历史的 user message，不会替换旧 prompt。当前 a6api/OpenAI Responses 适配器会以 DSH `sessionId` 设置 `prompt_cache_key`，不会使用 `previous_response_id` 只发送增量。pi-ai 明确从 provider 的输入量扣除缓存读/写，再映射到 DSH `inputTokens`。应同时观察 `totalTokens - outputTokens`（完整有效输入）、`inputTokens`（未命中部分）和 `cacheReadTokens`（缓存命中）；实际价格以网关账单为准。
 
-因此桥接的省 token 策略分两层：稳定块只在 Session 首轮注入，时间线后续逐条补增量；Session 按累计提交 prompt 字符预算轮换（默认普通会话 60000、任务 120000），`rotateEveryTurns > 0` 时普通会话另加轮数上限，`0` 表示仅使用字符预算。这个预算不等于完整模型上下文 token。随机 4 条表情目录每轮放在时间线之后、当前消息之前，延后前缀变化的位置。窗口指纹只在成功提交时保存，HMR 恢复；失败保留增量，轮换/模型变化/Session 丢失重置。若观察到 DSH `compaction/summary`，清除静态、记忆和窗口注入游标，下次重新补齐。
+因此桥接的省 token 策略分两层：稳定块只在 Session 首轮注入，时间线后续逐条补增量；Session 按累计提交 prompt 字符预算轮换（默认普通会话 60000、任务 120000），`rotateEveryTurns > 0` 时普通会话另加轮数上限，`0` 表示仅使用字符预算。这个预算不等于完整模型上下文 token。随机 8 条表情目录每轮放在时间线之后、当前消息之前，延后前缀变化的位置。窗口指纹只在成功提交时保存，HMR 恢复；失败保留增量，轮换/模型变化/Session 丢失重置。若观察到 DSH `compaction/summary`，清除静态、记忆和窗口注入游标，下次重新补齐。
 
 DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力阈值触发，不能替代短 Session；压缩还会额外消耗一次摘要请求，并且不会缩减工具 schema 或系统提示词。当前模型记录的窗口为 262144，在默认输出预留 32768、余量 65536 下触发阈值为 163840；30k 输入不会触发此默认策略。查证代码、日志样本及局限见 CACHE_PROMPT_AUDIT.md。
 
@@ -1402,7 +1406,7 @@ qq_send_custom_face    → 按编号发出去
 
 **为什么要有文字目录**：不给目录的话，模型根本不知道每个编号画的是什么，
 实测 11 次里 7 次挑了 `#1`、另有 2 次照抄提示词里的示例编号。
-有了目录它才能按情绪挑。每轮仅注入 4 条随机候选，逐行给出真实编号与描述，模型按当前语境决定是否使用。
+有了目录它才能按情绪挑。每轮仅注入 8 条随机候选，逐行给出真实编号与描述，模型按当前语境决定是否使用。
 
 **注意**：收藏表情只能取到**静态首帧**。要发会动的原生表情得用 `qq_send_mface`，
 参数从收到的动画表情消息里抄。
