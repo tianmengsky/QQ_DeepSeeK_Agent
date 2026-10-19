@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../lib/store.mjs';
-import { MemoryStore } from '../lib/memory/memory-store.mjs';
+import { MemoryStore, resolveMemoryDir } from '../lib/memory/memory-store.mjs';
 import { memoryTool } from '../lib/memory/tool.mjs';
 import { compactPersonMemory } from '../lib/memory/presentation.mjs';
 import { buildMemoryInjection, buildPrompt } from '../lib/prompt/render.mjs';
@@ -116,6 +116,14 @@ try {
     const p = buildPrompt(message(1), config({ memoryEnabled: true }), { includeStatic: true });
     assert.match(p, /qq_memory/); assert.match(p, /SAVED 回执才支持/); assert.match(p, /impression/);
     assert.doesNotMatch(p, /正常聊天即可/);
+  });
+  await test('memory directory follows stateDir when left empty', () => {
+    const data = path.join(root, 'state');
+    assert.equal(resolveMemoryDir({ memoryDir: '' }, data), path.join(data, 'memory'));
+    assert.equal(resolveMemoryDir({ memoryDir: '   ' }, data), path.join(data, 'memory'));
+    assert.equal(resolveMemoryDir({}, data), path.join(data, 'memory'));
+    const explicit = path.join(root, 'explicit-memory');
+    assert.equal(resolveMemoryDir({ memoryDir: explicit }, data), explicit, '显式配置必须优先');
   });
 } finally { for (const s of stores) s.db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 console.log(`${passed} passed, ${failed} failed`);

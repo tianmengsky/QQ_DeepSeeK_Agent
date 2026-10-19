@@ -2,22 +2,24 @@
 node_modules/
 
 # 运行时状态与数据库（不入库：含真实聊天记录）
-data/
-qq-mcp/data/
+# 注意：目录规则一律用前导 / 锚定到仓库根。没有前导斜杠的 memory/ 会匹配到
+# 任意层级的 memory 目录，把 lib/memory/ 这层源码也一起忽略掉。
+/data/
+/qq-mcp/data/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
 
 # 群友隐私数据（按 QQ 号存储的记忆档案）
-memory/
+/memory/
 
 # 内部工作记录：交班日志与设计/审计报告，不随公开仓库发布
-HANDOFF.md
-docs/reports/
+/HANDOFF.md
+/docs/reports/
 
 # 缓存与临时产物
-qq-mcp/cache/
-.codex-debug-stage/
+/qq-mcp/cache/
+/.codex-debug-stage/
 t-out.txt
 t-err.txt
 test-out.txt

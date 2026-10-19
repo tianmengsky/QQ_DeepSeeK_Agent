@@ -1321,7 +1321,7 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 | `memoryExtractIntervalMs` | `30000` | 同一会话两次提炼至少间隔多久 |
 | `memoryExtractTimeoutMs` | `15000` | 单批次提炼超时 |
 | `memoryProvider` / `memoryModel` | 空 | 记忆模型覆盖；都填写才生效 |
-| `memoryDir` | `D:\QQ-Memory` | 记忆文档目录（profile 里覆盖成了 `D:\Code\dsh-qq-bridge\memory`）|
+| `memoryDir` | 空 | 记忆文档目录；留空 = `<stateDir>/memory`（profile 里显式配成 `D:\Code\dsh-qq-bridge\memory`）|
 | `memoryMaxEntries` | `20` | 单文档条数上限，超了自动摘要 |
 | `memoryInjectRecent` | `2` | 群聊时额外注入几个最近参与者的记忆 |
 | `conversationMemoryMaxChars` | `450` | 会话「长期约定」面：字符限额；`0` = 整面关闭（不注入也不提炼，存档保留）|
