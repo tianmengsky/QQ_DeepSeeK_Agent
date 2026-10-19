@@ -2,13 +2,15 @@
 
 > 内部工作记录（`HANDOFF.md` 与 `docs/reports/` 下的设计、审计报告）不随本仓库发布；正文中以文件名提及，仅在本地工作副本中可查。
 
+2026-10-19 `v86-host-bound-source`：**移除模型侧的 `source_ref` 参数**。每轮由桥接按真实 DSH Session 发布「Session → 本轮 QQ 会话 + 来源」绑定（`qq-bridge:turn-session:<sessionId>`），工具派发前在 `tools/pre-execute` 把来源注入 `mcp__qq__*` 参数，覆盖模型可能自填的值；工具体与 guard 读到的都是宿主解析的归属。工具 schema、提示词、`qq_delegate` / `qq_memory` 参数里不再出现该键，戳一戳、表情回应等 schema 未声明它的工具不会再被"来源不符"误拒。后台工作子代理继承父回合登记在子 Session 上的来源，同样不用填。桌面会话（不在 QQ 回合内）可以显式指定 `group:/user:` 目标手动发送，文件/工作区工具仍要求本轮归属。内部 `source_ref` 记账保留（任务有效期、撤回、工作区校验、子代理归属），不再作为模型可见参数。
+
 2026-10-19 `v83-compact-dynamic-context`：每轮动态 prompt 改为按需注入。普通群聊省略绝对工作区路径，文件/任务回合和私聊仍提供；唤醒、时间线、工具回执、表情、记忆及任务信息按场景保留。工具安全所需的会话、`source_ref`、消息 ID 和执行归属字段不省略。
 
 2026-10-19 每轮动态注入的收藏表情候选由 4 条增至 8 条；源码默认值和 desktop profile 同步调整，目录不足 8 条时仍展示全部。
 
 2026-10-19 Emoji 提示词精简：移除人设卡中的“连续两轮最多一次”和重复的情绪映射表；人设与行为卡统一说明 Emoji/收藏表情可按语境自然选择，不设固定频率。静态协议仅保留实际输出格式，动态候选不再重复格式示范。
 
-2026-10-19 合并转发主动分页阅读：新增 QQ 工具 `qq_read_forward`（能力位 `read_forward`）。提示词首批内容仍按 20 条/6000 字符预算展开；若还有未展开节点，Agent 可沿本轮 `source_ref`、`forward_id` 和 `next_offset` 逐页读取，每页最多 20 条。工具会核对转发 ID 来自当前消息或其引用消息，并限制在当前会话，避免任意读取或一次性撑满上下文。当前 QQ 预设已授予 `read_forward`，连接使用 SnowLuma。
+2026-10-19 合并转发主动分页阅读：新增 QQ 工具 `qq_read_forward`（能力位 `read_forward`）。提示词首批内容仍按 20 条/6000 字符预算展开；若还有未展开节点，Agent 可沿 `forward_id` 和 `next_offset` 逐页读取，每页最多 20 条。工具会核对转发 ID 来自当前消息或其引用消息，并限制在当前会话，避免任意读取或一次性撑满上下文。当前 QQ 预设已授予 `read_forward`，连接使用 SnowLuma。
 
 2026-10-19 合并转发引用修复：引用消息中的 `forward` 段现在按引用图片的激发逻辑读取，默认调用 `get_forward_msg`；纯转发、文字触发、批次引用、清醒期和注意力闸门都不会漏掉它。读取结果按 `forwardMaxMessages: 20`、`forwardMaxChars: 6000` 截断后交给 Agent，失败保留明确占位。`forwardMode: 'always'` 每次展开，`forwardMode: 'never'` 永不展开；可调整 `forwardTimeoutMs`、`forwardTriggers` 和 `attachQuotedForwards`。
 
@@ -314,7 +316,7 @@ POST http://127.0.0.1:19387/qq/onebot          ← 本插件用 webServer.regist
 
 桥接按工具调用边界区分过程与最终回复：调用工具前或同条消息带 `tool-call` 的正文只留在 DSH，不在完成时补发；最后一次工具调用之后的完整正文才进入投递计划。无工具回合保留全部正文片段。即时开工和阶段说明只写在 `qq_say.text`，完成后另写最终结果、限制和玩法。工具结果按顶层 `callId` 或 DSH 的 `message.toolCallId` / `message.source.callId` 配对，不能因事件格式变化漏认成功发言。在线 `replyPolicy.textSelection=post-tool-final`，`stats.lastTurn` 可查看剔除的过程文字数量和字符数。重载恢复使用相同收集规则，已经保存的投递计划仍按原幂等编号恢复。
 
-来源校验依赖 MCP 与桥接连接同一个 `QQ_BRIDGE_DB`。共享 SQLite 启动/迁移的写锁等待上限为 2 秒；MCP 初次连接或来源表初始化失败后，后续工具调用会重新连接/初始化，避免进程永久失效。`qq_status` 显示桥接数据库与来源校验状态；数据库不可用时明确报连接故障，不能误报 `source_ref` 过期。有效期、撤回、会话隔离和文件工作区范围继续校验。
+归属校验依赖 MCP 与桥接连接同一个 `QQ_BRIDGE_DB`。共享 SQLite 启动/迁移的写锁等待上限为 2 秒；MCP 初次连接或归属表初始化失败后，后续工具调用会重新连接/初始化，避免进程永久失效。`qq_status` 显示桥接数据库与归属校验状态；数据库不可用时明确报连接故障，不能误报"来源过期"。有效期、撤回、会话隔离和文件工作区范围继续校验。
 
 较长写作、编程、多轮网络搜索或耗时步骤可以用 `qq_say` 发简短进度，工具前的普通正文只留在 DSH。快速问答、短文润色和单次查询直接最终回复；仅任务拖长、受阻或有实际阶段结果时追加进度，不编造用时/百分比，最终保留完整结果。文件工具不再要求开工回执，已有文件可直接读取、修改、打包和发送。
 
@@ -332,7 +334,7 @@ POST http://127.0.0.1:19387/qq/onebot          ← 本插件用 webServer.regist
 
 生成后以及每个待发气泡/表情派发前复核最新消息，候选只包含剩余未发正文。明确请求者取消/撤回会结束待发内容；答复、纠错、确认和结果不因换话题而取消。更新必须指向原请求者实际修改原要求的消息，重新判断只合并这些证据对应的输入，独立新问题不合并；丢弃必须标明纯闲聊、确已过时及具体新消息证据，其他人的互动不能否决直接请求。仅当时间线变化且有实质内容时，用当前模型作一次有完整上下文和候选正文的轻量复核，超时 4 秒、坏 JSON 或缺少证据回退保守规则；回退只识别明确取消/撤回与明确修改，不按同作者又发言或多人数量丢答复。同版本同候选复用判断；无变化、纯背景表情/确认及工具结果无需额外分类。语义分类仍可能出错，需自然实聊观察。工具回合的结果保留交付，普通补充不会重跑工具；明确取消后不继续文件写入/发送。已成功气泡保留原回执，尚未派发的过时内容以 `floor:<原因>` 结束，UNKNOWN/EXECUTING 仍需人工核对。
 
-`qq_say`、群/私聊文字及图片/表情工具共用 SQLite 来源复核，桥接回合必须带本轮 `source_ref`，不能换工具绕过。跳过返回 `SKIPPED`，不记发言、不刷新唤醒、不占图库冷却；收藏表情保留结构化回执。在线 `replyPolicy.floorMode=request-batches-and-reply-value-recheck`、`inputBatches`、`lastFloorDecision` 可查行为；后者包含 value/basis/evidence 与 fallback，解释为什么保留、修订或丢弃。stats 保留 `inputBatches/inputsCoalesced/floorWaits/floorDeclined/floorRechecks/floorRecheckFallbacks`。真实 QQ 不发合成验证消息。
+`qq_say`、群/私聊文字及图片/表情工具共用 SQLite 归属复核：桥接按真实 DSH Session 注入本轮来源，模型不需要也不能自填，换工具不能绕过。跳过返回 `SKIPPED`，不记发言、不刷新唤醒、不占图库冷却；收藏表情保留结构化回执。在线 `replyPolicy.floorMode=request-batches-and-reply-value-recheck`、`inputBatches`、`lastFloorDecision` 可查行为；后者包含 value/basis/evidence 与 fallback，解释为什么保留、修订或丢弃。stats 保留 `inputBatches/inputsCoalesced/floorWaits/floorDeclined/floorRechecks/floorRecheckFallbacks`。真实 QQ 不发合成验证消息。
 
 时间线修复：自己的成功发言记录实际回执时间，旧 self_message 缺少时间时按事件 created_at 恢复，已被旧重载污染的窗口也可纠正。QQ 历史回读保留协议时间，不被本地错误时间反向覆盖；同秒消息保持原顺序，不按随机消息 ID 排序。旧 Session 中可能已积累错误时间线，新架构签名会换新 Session 并保留修复后的窗口与记忆。
 
@@ -410,7 +412,7 @@ QQ 会话跑的是一个完整 DSH Agent，所以它能用 preset 给它的工�
 
 每个 QQ 群/私聊使用独立目录：`%USERPROFILE%\.dsh\qq-workspaces\group-<群号>` 或 `user-<QQ号>`。`qq_workspace` 只接受工作区内相对路径，支持列文件、读写 UTF-8 文本和 ZIP 打包；最多 200 个文件/50 MiB，单文件 20 MiB。`qq_send_file` 只发送当前会话目录里的普通文件。QQ 预设没有通用文件工具或程序执行工具，小游戏源码可作为 HTML 或 ZIP 发回；要试玩 HTML 需在本机浏览器打开。
 
-文件工具直接使用当前 `conversation` / `source_ref` 和 QQ 会话工作区；`qq_say` 只用于需要即时告知对方的开工或阶段进度，不再作为文件读写、打包或发送的前置条件。文件仍校验来源有效期、会话归属、相对路径、链接/硬链接和能力位；`read/list`、写入、打包、发送都只触及当前群或私聊目录。在线状态的 `workspace.progressPolicy` 为 `source-and-conversation-workspace`。
+文件工具直接使用当前 `conversation` 和 QQ 会话工作区（本轮归属由宿主按 Session 绑定）；`qq_say` 只用于需要即时告知对方的开工或阶段进度，不再作为文件读写、打包或发送的前置条件。文件仍校验归属有效期、会话归属、相对路径、链接/硬链接和能力位；`read/list`、写入、打包、发送都只触及当前群或私聊目录。在线状态的 `workspace.progressPolicy` 为 `source-and-conversation-workspace`。
 
 要交 Word / PDF 时不用自己拼二进制：`create_word_document` / `create_pdf` 直接生成 `.docx` / `.pdf`。这两个是 document-editor MCP（独立进程，cwd 不是会话工作区）的工具，`output_path` **只认绝对路径**，所以每轮提示词都会摊开本会话工作区的绝对路径（`【工作区绝对路径】` 一行）；产物必须落在该群或私聊目录里，随后可直接用 `qq_send_file` 发送。
 
@@ -421,7 +423,7 @@ QQ 会话跑的是一个完整 DSH Agent，所以它能用 preset 给它的工�
 
 群内成员仍可要求 Agent 在该群共享工作区里创建、修改和发送程序文件；群白名单仍通过 `groups` 管理。工作区限制模型能接触的文件范围，不提供执行代码的能力。
 
-文件属于 QQ 会话工作区，独立于任务、DSH Session 和创建文件时的来源编号。同群/同私聊新回合使用自己的有效 `source_ref` 即可读取旧文件并继续修改、打包或发送；旧来源过期不删除文件，其他群/私聊仍隔离。任务路由仍只决定模型上下文和执行归属，不再改变文件目录或文件工具可见范围。
+文件属于 QQ 会话工作区，独立于任务、DSH Session 和创建文件时的来源编号。同群/同私聊新回合自动带自己的有效归属即可读取旧文件并继续修改、打包或发送；旧来源过期不删除文件，其他群/私聊仍隔离。任务路由仍只决定模型上下文和执行归属，不再改变文件目录或文件工具可见范围。
 
 ### 5. 它能主动发的 QQ 动作（`mcp__qq__*`）
 
@@ -995,8 +997,8 @@ D:\Code\dsh-qq-bridge\memory\
 接回原始起因。切换窗口、Session 轮换和插件重载不会丢失这些记录。例如甲让她转告乙，
 乙随后问起，可以取回甲的身份、转告内容与发送回执；其他私聊的起因原文不向乙注入。
 
-每轮发布独立的 `source_ref`，发送工具原样填入；桥接也按已归属的 DSH turn/callId
-补记来源，兼容未提供编号的旧工具。没有来源证据时明确标为「来源未记录」，不猜是谁委托。
+每轮按真实 DSH Session 绑定来源，发送工具由宿主自动注入；桥接也按已归属的 DSH turn/callId
+补记来源，兼容旧调用。没有来源证据时明确标为「来源未记录」，不猜是谁委托。
 工具和普通最终正文均按真实发送结果记账；失败、EXECUTING、UNKNOWN 不表示完成，
 dry-run 和幂等重放不创建新经历、不刷新发言窗口。工具发送也写回目标会话的历史。
 消息撤回会屏蔽对应来源及出站消息的事件，来源编号被撤回或过期后不能再绑定新工具调用。
@@ -1026,7 +1028,7 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 `bridge_agent_memories`，事务提交后返回 SAVED/FORGOTTEN；Markdown 投影失败仍承认已提交，
 下次读取重建。旧手工备注继续保留，不自动改写。
 
-每次工具调用必须带本轮 `source_ref`，按真实 DSH Session 核对归属，只能管理当前发送者；
+每次工具调用由宿主按真实 DSH Session 注入来源并核对归属，只能管理当前发送者；
 任务 Session 使用已有执行来源验证，关闭/过期/撤回来源不能写。原文证据必须来自该
 发送者本轮消息，日期/时期保留到 `period`，印象明确标注为主观判断。此校验保证来源
 归属，语义是否准确、模型是否主动调用仍需自然实聊观察。后台同槽事实不会覆盖主模型

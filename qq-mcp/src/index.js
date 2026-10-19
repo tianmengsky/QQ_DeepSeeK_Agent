@@ -6,7 +6,7 @@ import { CHAT_TOOLS, ADMIN_TOOLS } from '../../lib/agent/tool-sets.mjs';
 import { extractAtMentions, atMarkerTokens, literalAtTarget } from '../../lib/domain/reply-policy.mjs';
 import { workspaceRoot, WORKSPACE_STATE_KEY, workspaceAction, readWorkspaceFile, snapshotFile, fileName } from '../../lib/agent/workspace.mjs';
 import { recordFileProgress } from '../../lib/agent/file-progress.mjs';
-import { assertExecutionSource, activeExecutionSources, crossConversationAllowed } from '../../lib/agent/execution-scope.mjs';
+import { assertExecutionSource, crossConversationAllowed } from '../../lib/agent/execution-scope.mjs';
 import { checkToolFloor } from '../../lib/conversation/floor.mjs';
 /**
  * qq-mcp — 让 Agent 通过 SnowLuma 提供的 OneBot v11 HTTP 接口在 QQ 里发消息。
@@ -335,6 +335,7 @@ function forwardNodeLine(node) {
 
 async function readForwardPage(args) {
   assertCapability('read_forward');
+  if (!args.source_ref) throw new Error('合并转发阅读只能在本轮 QQ 会话内使用');
   const origin = requireSource(args.source_ref);
   const conversation = String(origin.conversation ?? '');
   const isGroup = conversation.startsWith('group:');
@@ -350,7 +351,7 @@ async function readForwardPage(args) {
           ? live.message.find((s) => s?.type === 'reply')?.data?.id ?? null : null,
       };
     } catch (error) {
-      throw new Error(`当前 source_ref 对应的原始消息已不在桥接缓存中，且无法回读核对：${error.message}`);
+      throw new Error(`本轮消息已不在桥接缓存中，且无法回读核对：${error.message}`);
     }
   }
 
@@ -367,7 +368,7 @@ async function readForwardPage(args) {
     candidates.push(...forwardIdsInMessage(quoted?.message));
   }
   if (!candidates.includes(wanted)) {
-    throw new Error('forward_id 不属于本轮 source_ref 的当前消息或其引用消息，拒绝读取。');
+    throw new Error('forward_id 不属于本轮消息或其引用消息，拒绝读取。');
   }
 
   const offset = Math.max(0, Number.isSafeInteger(Number(args.offset)) ? Number(args.offset) : 0);
@@ -636,12 +637,11 @@ const TOOLS = [
     inputSchema: { type: 'object', additionalProperties: false,
       properties: {
         conversation: { type: 'string', description: '当前会话，例如 group:123 或 user:456' },
-        source_ref: { type: 'string', description: '桥接提示词的本轮来源编号，必须原样填写' },
         action: { type: 'string', enum: ['list', 'read', 'write', 'pack'] },
         path: { type: 'string', description: '工作区相对路径；list/pack 省略表示整个工作区' },
         content: { type: 'string', description: 'write 的完整文件内容' },
         output: { type: 'string', description: 'pack 的输出 ZIP 文件名，例如 game.zip' },
-      }, required: ['conversation', 'source_ref', 'action'] },
+      }, required: ['conversation', 'action'] },
   },
   {
     name: 'qq_send_file',
@@ -649,11 +649,10 @@ const TOOLS = [
     inputSchema: { type: 'object', additionalProperties: false,
       properties: {
         conversation: { type: 'string', description: '当前 QQ 会话，不能填其他会话' },
-        source_ref: { type: 'string', description: '本轮来源编号，必须原样填写' },
         path: { type: 'string', description: '工作区内的相对文件路径' },
         name: { type: 'string', description: '可选发送文件名，默认原文件名' },
         idem_key: { type: 'string', description: '同一次发送重试使用同一编号' },
-      }, required: ['conversation', 'source_ref', 'path'] },
+      }, required: ['conversation', 'path'] },
   },
   {
     name: 'qq_status',
@@ -663,14 +662,13 @@ const TOOLS = [
   },
   {
     name: 'qq_read_forward',
-    description: '按页读取本轮消息或本轮引用消息中的合并转发。只接受本轮真实 source_ref，且会重新核对 forward_id 确实属于该消息；每页最多 20 条。首批内容提示“未展开”时从 next_offset 继续，直到 has_more=false。需要 read_forward 能力位。',
+    description: '按页读取本轮消息或本轮引用消息中的合并转发。只会读取属于本轮消息或其引用消息的 forward_id；每页最多 20 条。首批内容提示“未展开”时从 next_offset 继续，直到 has_more=false。需要 read_forward 能力位。',
     inputSchema: { type: 'object', additionalProperties: false,
       properties: {
-        source_ref: { type: 'string', description: '本轮提示词中的来源编号，必须原样填写' },
         forward_id: { type: 'string', description: '当前消息或其引用目标中实际出现的 forward id/resid' },
         offset: { type: 'integer', description: '起始节点偏移，首次填 0，后续沿用上页 next_offset；默认 0' },
         limit: { type: 'integer', description: '本页节点数，默认 20，上限 20' },
-      }, required: ['source_ref', 'forward_id'],
+      }, required: ['forward_id'],
     },
   },
   {
@@ -740,7 +738,7 @@ const TOOLS = [
   {
     name: 'qq_say',
     description:
-      '立即向当前会话发送必要的真实进度，正文用 text（纯文本），来源用本轮 source_ref。普通聊天及新的完成结果交最终正文，由桥接发送；工具旁正文留在 DSH。文件操作可直接进行。UNKNOWN 先核对、重试沿用原 idem_key。示范：长文开始时 text="我先理一下结构"，随后实际委派。',
+      '立即向当前会话发送必要的真实进度，正文用 text（纯文本）。普通聊天及新的完成结果交最终正文，由桥接发送；工具旁正文留在 DSH。文件操作可直接进行。UNKNOWN 先核对、重试沿用原 idem_key。示范：长文开始时 text="我先理一下结构"，随后实际委派。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1335,22 +1333,11 @@ async function sendMessage(kind, idKey, id, args, { capability = 'send_text', id
     const origin = requireSource(sourceRef);
     const scope = assertExecutionSource(bridgeStore, origin);
     // 跨会话开关打开时，这个 Agent 被当作跨群活动的个体：目标可以不是本轮的
-    // 会话，但仍必须带有效的本轮 source_ref，且目标另外受白名单约束。
+    // 会话，但其归属仍来自真实 Session，目标另外受白名单约束。
     if (scope && origin.conversation !== conversation && !crossConversationAllowed(bridgeStore))
-      throw new Error('任务工具不得发送到来源以外的会话');
+      throw new Error('任务工具不得发送到本轮会话以外的会话');
     if (filePayload && origin.conversation !== conversation)
       throw new Error('文件属于当前 QQ 会话工作区，不能跨会话发送');
-  } else if (activeExecutionSources(bridgeStore).length) throw new Error('并发任务发言必须提供本轮 source_ref');
-  if (!sourceRef && bridgeStore?.available) {
-    let active;
-    try {
-      const scoped = JSON.parse(bridgeStore.getState('qq-bridge:floor-active:' + conversation) ?? 'null');
-      active = scoped ? { ...scoped, key: conversation }
-        : JSON.parse(bridgeStore.getState('bridge:active-conversation') ?? 'null');
-    } catch {}
-    if (active?.key === conversation && active.sourceRef && Date.now() - active.at < 300000 &&
-        bridgeStore.getState('qq-bridge:floor-source:' + active.sourceRef))
-      throw new Error('当前桥接回合的发送工具必须填写本轮 source_ref，以便发送前复核发言时机。');
   }
   const key =
     idemKey || `mcp:${conversation}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
@@ -1547,10 +1534,6 @@ const MUTATING_TOOLS = new Set([
 ]);
 const SPEECH_TOOL_NAMES = new Set(['qq_send_group_msg', 'qq_send_private_msg', 'qq_say',
   'qq_send_sticker', 'qq_send_custom_face', 'qq_send_library_sticker', 'qq_send_mface', 'qq_send_file']);
-for (const tool of TOOLS) if (SPEECH_TOOL_NAMES.has(tool.name)) {
-  tool.inputSchema.properties.source_ref = { type: 'string',
-    description: '提示词【本轮来源】编号，原样填入以记录谁让你发消息；跨会话发送尤其需要。' };
-}
 /**
  * 工具能力和工具可见性是两件事：QQ_CAPABILITIES 控制能否执行，
  * QQ_TOOLSET 控制模型每轮需要阅读哪些 schema。默认 all 保持兼容。
@@ -1590,69 +1573,26 @@ function ensureBridgeReady() {
     episodeLedger = new EpisodeLedger(bridgeStore, { warn: log });
 }
 function requireSource(ref) {
-  if (!BRIDGE_DB_PATH) throw new Error('来源校验未配置 QQ_BRIDGE_DB，无法核对本轮 source_ref；请修复 MCP 与桥接数据库连接。');
+  if (!ref) throw new Error('这次调用没有本轮 QQ 会话归属：发送工具只能在 QQ 回合内使用，或显式指定目标。');
+  if (!BRIDGE_DB_PATH) throw new Error('归属校验未配置 QQ_BRIDGE_DB，无法核对本轮归属；请修复 MCP 与桥接数据库连接。');
   if (!bridgeStore?.available || !episodeLedger.available)
-    throw new Error('来源校验数据库暂不可用，不是 source_ref 过期或文件权限不足；请检查桥接数据库连接。' +
-      (bridgeConnectionError ? `原因：${bridgeConnectionError}` : '来源校验表初始化失败。'));
+    throw new Error('归属校验数据库暂不可用；请检查桥接数据库连接。' +
+      (bridgeConnectionError ? `原因：${bridgeConnectionError}` : '归属校验表初始化失败。'));
   const origin = episodeLedger.resolve(ref);
-  if (!origin) throw new Error('source_ref 无效、已撤回或过期，请使用本轮来源编号。');
+  if (!origin) throw new Error('本轮归属已失效（回合结束、消息撤回或过期）；这一轮请改用最终正文投递，不要重试工具发送。');
   assertExecutionSource(bridgeStore, origin);
   return origin;
 }
 function currentWorkspace(args) {
+  if (!args.source_ref) throw new Error('工作区与文件工具只能在本轮 QQ 会话内使用。');
   const origin = requireSource(args.source_ref);
   if (origin.conversation !== args.conversation)
-    throw new Error('工作区要求有效的本轮 source_ref，且 conversation 必须是该来源的当前会话');
+    throw new Error('conversation 必须是本轮会话');
   const isGroup = origin.conversation.startsWith('group:');
   const id = Number(origin.conversation.slice(isGroup ? 6 : 5));
   assertAllowed(isGroup ? 'group' : 'user', id);
   return { origin, root: workspaceRoot({ workspaceRoot: bridgeStore.getState(WORKSPACE_STATE_KEY) || process.env.QQ_WORKSPACE_ROOT || '' }),
     conversation: origin.conversation, scope: origin.conversation, isGroup, id };
-}
-/**
- * 读桥接发布的"当前正在跟谁说话"。
- *
- * `qq_say` 跑在独立进程里，本来无从知道模型此刻在哪个会话里说话。
- * 桥接在每一轮开始前把会话写进**共享的** runtime_state，这一轮结束再撤掉；
- * 所以轮内调用一定能读到。
- *
- * 为什么不干脆让模型自己填目标：那样模型填错、或被人用提示词注入骗，
- * 就等于替它往别的群里说话。校验权必须留在桥接这侧。
- *
- * TTL 是兜底：万一某个标记因为崩溃没撤掉，也不至于让一次迟到很久的调用
- * 往一个早就结束的会话里发言。
- */
-const ACTIVE_CONVERSATION_KEY = 'bridge:active-conversation';
-function activeConversationFromBridge() {
-  if (activeExecutionSources(bridgeStore).length) throw new Error('任务回合必须填写本轮 source_ref，不能使用全局当前会话');
-  if (!bridgeStore?.available) {
-    throw new Error(
-      '没有连桥接数据库（QQ_BRIDGE_DB 未配置或打不开），qq_say 无法确认你在哪个会话里说话。' +
-        '改用 qq_send_group_msg / qq_send_private_msg 并自己填目标。',
-    );
-  }
-  const raw = bridgeStore.getState(ACTIVE_CONVERSATION_KEY);
-  let cur = null;
-  try {
-    cur = raw ? JSON.parse(raw) : null;
-  } catch {
-    cur = null;
-  }
-  if (!cur?.key) {
-    throw new Error(
-      '桥接现在没有"正在进行的会话"—— 大概率不在某个 QQ 会话的回合里（比如是你自己在别的会话里调我）。' +
-        '改成 qq_send_group_msg / qq_send_private_msg 并自己填目标。',
-    );
-  }
-  const age = Date.now() - Number(cur.at ?? 0);
-  const ttl = Number(process.env.QQ_ACTIVE_CONVERSATION_TTL_MS ?? 300000);
-  if (!(age >= 0 && age < ttl)) {
-    throw new Error(
-      `桥接发布的当前会话已经过期（${Math.round(age / 1000)} 秒前，上限 ${Math.round(ttl / 1000)} 秒），` +
-        '拒绝往一个可能早就结束的会话里发言。',
-    );
-  }
-  return cur;
 }
 
 /**
@@ -1745,9 +1685,9 @@ async function handle(name, args = {}) {
           `已登录：${nick} (${info.user_id})` + (freshNick ? '（昵称实时读取）' : ''),
           `发送模式：${DRY_RUN ? 'DRY-RUN（不会真实发出）' : '真实发送'}`,
           '',
-          '## 桥接来源校验',
+          '## 桥接归属校验',
           `桥接数据库：${BRIDGE_DB_PATH || '未配置 QQ_BRIDGE_DB'}`,
-          `来源校验：${episodeLedger.available ? '可用' : '不可用'}`,
+          `归属校验：${episodeLedger.available ? '可用' : '不可用'}`,
           ...(bridgeConnectionError ? [`连接错误：${bridgeConnectionError}`] : []),
           '',
           '## 授权',
@@ -1819,9 +1759,13 @@ async function handle(name, args = {}) {
       });
 
     case 'qq_say': {
+      // 有宿主注入的本轮归属时以它为准；没有（例如桌面会话手动调用）则必须显式
+      // 给出 conversation。归属不再由模型抄一个来源编号来证明。
       const origin = args.source_ref ? requireSource(args.source_ref) : null;
-      const cur = origin ? { key: origin.conversation, messageId: origin.message_id } : activeConversationFromBridge();
       const want = String(args.conversation ?? '').trim();
+      const cur = origin ? { key: origin.conversation } : null;
+      if (!origin && !want)
+        throw new Error('qq_say 需要 conversation（group:<群号> 或 user:<QQ号>）：当前不在某个 QQ 会话回合里。');
       /**
        * 默认：必须说在本轮会话里（防止填错目标或被人骗着替别的群说话）。
        *
@@ -1830,9 +1774,9 @@ async function handle(name, args = {}) {
        * 本轮会话"这一条，不是"能发到哪里"。
        */
       const cross = Boolean(origin) && crossConversationAllowed(bridgeStore);
-      if (want !== cur.key && !cross) {
+      if (cur && want !== cur.key && !cross) {
         throw new Error(
-          `会话对不上：你说的是 ${want || '(空)'}，但当前正在进行的会话是 ${cur.key}。` +
+          `会话对不上：你说的是 ${want}，但本轮会话是 ${cur.key}。` +
             '为避免发错地方，这条被拒绝了。请用提示词里「当前会话」那一行的值。',
         );
       }

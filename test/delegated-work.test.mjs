@@ -164,7 +164,7 @@ try {
     await source(r,2,300); // Same Session now belongs to another request.
     r.state.delegatedWork.progress({source_ref:s.ref,job_id:j.job_id,text:'正文已生成'}, {agent:child});
     assert.equal(s.parent.injections.length,1);
-    assert.throws(()=>r.state.delegatedWork.progress({source_ref:s.ref,job_id:j.job_id,text:'伪造'},s.exec),/source_ref|Session/);
+    assert.throws(()=>r.state.delegatedWork.progress({source_ref:s.ref,job_id:j.job_id,text:'伪造'},s.exec),/进度必须属于当前工作子代理/);
   });
   await test('native error produces a failure completion, never an invented success', async () => {
     const r=make(),s=await source(r),j=await start(r,s),done=r.state.delegatedWork.live.get(j.job_id).done;

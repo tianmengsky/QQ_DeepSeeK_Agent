@@ -105,12 +105,13 @@ try {
     assert.match(r.prompts[1].content[0].text, /\"id\":\"banter\"/);
     assert.match(r.prompts[1].content[0].text, /【长任务协调】/);
   });
-  await test('dynamic context keeps source, addressee and chronological history near the current input', () => {
+  await test('dynamic context keeps addressee and chronological history near the current input', () => {
     const prompt = buildPrompt(message(4, '当前提问'), config(cards), {
-      includeStatic: false, sourceRef: 'offline-source', taskText: '任务事实',
+      includeStatic: false, taskText: '任务事实',
       memoryText: '人物事实', windowText: '甲旧消息\n自己消息\n乙新消息',
     });
-    assert.match(prompt, /【本轮来源】offline-source/);
+    assert.match(prompt, /【当前会话】group:10/);
+    assert.doesNotMatch(prompt, /source_ref|offline-source/);
     assert.ok(prompt.indexOf('甲旧消息') < prompt.indexOf('自己消息'));
     assert.ok(prompt.indexOf('自己消息') < prompt.indexOf('乙新消息'));
     assert.ok(prompt.indexOf('乙新消息') < prompt.indexOf('—— 现在这条消息 ——'));

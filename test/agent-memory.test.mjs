@@ -8,7 +8,7 @@ import { memoryTool } from '../lib/memory/tool.mjs';
 import { compactPersonMemory } from '../lib/memory/presentation.mjs';
 import { buildMemoryInjection, buildPrompt } from '../lib/prompt/render.mjs';
 import { config, message } from './helpers/bridge.mjs';
-import { publishExecutionSource, closeExecutionSource } from '../lib/agent/execution-scope.mjs';
+import { publishExecutionSource, closeExecutionSource, publishTurnSession } from '../lib/agent/execution-scope.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-memory-'));
 let passed = 0, failed = 0, sequence = 0;
@@ -28,7 +28,8 @@ function rig() {
   const registry = { byKey: new Map([['group:10', { sessionId: 'session-a' }]]) };
   const state = { enabled: true, disposed: false, sourceLedger: memory.episodes };
   const tool = memoryTool({ memory, registry, store, config: cfg, state });
-  const call = (args, session = 'session-a') => tool.execute({ source_ref: origin, ...args },
+  publishTurnSession(store, 'session-a', { conversation: 'group:10', sourceRef: origin });
+  const call = (args, session = 'session-a') => tool.execute(args,
     { agent: { session: { id: session } }, signal: new AbortController().signal });
   const write = (args = {}) => call({ action: 'upsert', slot: 'profile.internship', version: 0,
     kind: 'explicit', text: '在实习', period: '十月到十二月', evidence: '十月到十二月在实习', ...args });
@@ -64,7 +65,7 @@ try {
     assert.match(r.memory.read('200'), /很重视记忆/);
   });
   await test('another Session, fabricated evidence, disabled hosting and revoked source cannot write', () => {
-    const r = rig(); assert.throws(() => r.call({ action: 'read' }, 'session-other'), /当前 Session/);
+    const r = rig(); assert.throws(() => r.call({ action: 'read' }, 'session-other'), /来源无效|当前 Session/);
     assert.throws(() => r.write({ evidence: '我今年毕业' }), /真实原文/);
     r.state.enabled = false; assert.throws(() => r.write(), /不可用|关闭/); r.state.enabled = true;
     r.memory.episodes.retract('group:10', '1'); assert.throws(() => r.write(), /来源无效/);
@@ -83,7 +84,7 @@ try {
     assert.throws(() => r.call({ action: 'read' }), /当前 Session/);
     assert.equal(r.call({ action: 'read' }, 'task-session').status, 'READ');
     closeExecutionSource(r.store, r.origin);
-    assert.throws(() => r.call({ action: 'read' }, 'task-session'), /关闭/);
+    assert.throws(() => r.call({ action: 'read' }, 'task-session'), /来源无效|关闭|过期/);
   });
   await test('SQLite failure reports failure instead of claiming saved', () => {
     const r = rig(); r.store.db.exec(`CREATE TRIGGER fail_agent_memory BEFORE INSERT ON bridge_agent_memories

@@ -1601,7 +1601,7 @@ await test('MCP 额度满时仍可重放既有成功回执', async () => {
 // 所以桥接把"当前会话"写进共享库，工具据此**校验**目标。
 
 /** 真 Store 用的是 runtime_state(key, value, updated_at)。 */
-function makeSayDb(dir, marker) {
+function makeSayDb(dir, marker, source = null) {
   const { DatabaseSync } = require('node:sqlite');
   const file = path.join(dir, 'bridge-say.sqlite3');
   const db = new DatabaseSync(file);
@@ -1610,6 +1610,11 @@ function makeSayDb(dir, marker) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE memory_origins (
+      ref TEXT PRIMARY KEY, conversation TEXT NOT NULL, message_id TEXT,
+      qq TEXT NOT NULL, who TEXT NOT NULL, text TEXT NOT NULL,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1623,13 +1628,21 @@ function makeSayDb(dir, marker) {
       created_at INTEGER NOT NULL
     );
   `);
+  let sourceRef = null;
+  if (source) {
+    sourceRef = source.ref ?? 'say-source';
+    db.prepare(`INSERT INTO memory_origins
+      (ref, conversation, message_id, qq, who, text, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(sourceRef, source.conversation, source.messageId ?? 'm1', source.qq ?? '200',
+        source.who ?? '甲', source.text ?? '当前提问', Date.now(), Date.now() + 600000);
+  }
   if (marker !== undefined)
     db.prepare('INSERT INTO runtime_state (key, value, updated_at) VALUES (?,?,?)').run(
       'bridge:active-conversation',
       JSON.stringify(marker),
       Date.now(),
     );
-  return { file, db };
+  return { file, db, sourceRef };
 }
 
 function startSayClient(dbFile, caps = 'send_text', extra = {}) {
@@ -1756,11 +1769,12 @@ await test('qq_say 里的 @ 标记变成真 at 段，标记本身不漏成正文
 
 await test('会话对不上 → 拒绝，绝不发到别的会话', async () => {
   const dir = tmpDir();
-  const { file, db } = makeSayDb(dir, { key: 'group:111', at: Date.now(), messageId: 'm1' });
+  const { file, db, sourceRef } = makeSayDb(dir, { key: 'group:111', at: Date.now(), messageId: 'm1' },
+    { conversation: 'group:111' });
   const client = startSayClient(file);
   try {
     await client.init();
-    const res = await client.call('qq_say', { conversation: 'group:999', text: '发错群了' });
+    const res = await client.call('qq_say', { conversation: 'group:999', source_ref: sourceRef, text: '发错群了' });
     assert.equal(res.isError, true, '发错地方必须被拦住');
     assert.match(res.text, /会话对不上/);
     assert.equal(
@@ -1774,7 +1788,23 @@ await test('会话对不上 → 拒绝，绝不发到别的会话', async () => 
   }
 });
 
-await test('桥接没在跑会话（标记为 null）→ 明确报错而不是乱发', async () => {
+await test('没有本轮归属时显式 conversation 仍可手动发送', async () => {
+  const dir = tmpDir();
+  const { file, db } = makeSayDb(dir);
+  const client = startSayClient(file);
+  try {
+    await client.init();
+    const before = onebot.calls.filter((c) => c.params.message === '手动发送').length;
+    const res = await client.call('qq_say', { conversation: 'group:111', text: '手动发送' });
+    assert.equal(res.isError, false, res.text);
+    assert.equal(onebot.calls.filter((c) => c.params.message === '手动发送').length, before + 1);
+  } finally {
+    client.kill();
+    db.close();
+  }
+});
+
+await test('没有本轮归属且没填 conversation → 明确报错而不是乱发', async () => {
   const dir = tmpDir();
   const { file, db } = makeSayDb(dir);
   db.prepare('INSERT INTO runtime_state (key, value, updated_at) VALUES (?,?,?)').run(
@@ -1785,24 +1815,9 @@ await test('桥接没在跑会话（标记为 null）→ 明确报错而不是�
   const client = startSayClient(file);
   try {
     await client.init();
-    const res = await client.call('qq_say', { conversation: 'group:111', text: 'x' });
+    const res = await client.call('qq_say', { text: 'x' });
     assert.equal(res.isError, true);
-    assert.match(res.text, /没有"正在进行的会话"/);
-  } finally {
-    client.kill();
-    db.close();
-  }
-});
-
-await test('标记过期 → 拒绝，不往一个可能早就结束的会话里发言', async () => {
-  const dir = tmpDir();
-  const { file, db } = makeSayDb(dir, { key: 'group:111', at: Date.now() - 3600_000 });
-  const client = startSayClient(file, 'send_text', { QQ_ACTIVE_CONVERSATION_TTL_MS: '60000' });
-  try {
-    await client.init();
-    const res = await client.call('qq_say', { conversation: 'group:111', text: 'x' });
-    assert.equal(res.isError, true);
-    assert.match(res.text, /已经过期/);
+    assert.match(res.text, /需要 conversation/);
   } finally {
     client.kill();
     db.close();
@@ -1835,7 +1850,7 @@ await test('私聊会话也走同一条路（发给对方，不发给机器人�
   }
 });
 
-await test('没配 QQ_BRIDGE_DB → 说清楚是因为没连库，并给出退路', async () => {
+await test('没配 QQ_BRIDGE_DB → 手动发送仍可用，来源类工具给出明确限制', async () => {
   const dir = tmpDir();
   const client = startMcp({
     ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`,
@@ -1845,10 +1860,11 @@ await test('没配 QQ_BRIDGE_DB → 说清楚是因为没连库，并给出退�
   });
   try {
     await client.init();
-    const res = await client.call('qq_say', { conversation: 'group:111', text: 'x' });
-    assert.equal(res.isError, true);
-    assert.match(res.text, /QQ_BRIDGE_DB|桥接数据库/);
-    assert.match(res.text, /qq_send_group_msg/, '要给出退路');
+    const res = await client.call('qq_say', { conversation: 'group:111', text: '手动发送' });
+    assert.equal(res.isError, false, res.text);
+    const workspace = await client.call('qq_workspace', { conversation: 'group:111', action: 'list' });
+    assert.equal(workspace.isError, true);
+    assert.match(workspace.text, /只能在本轮 QQ 会话内使用/);
   } finally {
     client.kill();
   }
@@ -1894,7 +1910,8 @@ await test('cross-conversation MCP send persists source and receipt; replay and 
   try {
     await client.init();
     const tools = await client.listTools();
-    assert.ok(tools.find((t) => t.name === 'qq_send_private_msg').inputSchema.properties.source_ref);
+    assert.ok(!('source_ref' in (tools.find((t) => t.name === 'qq_send_private_msg').inputSchema.properties ?? {})),
+      'source_ref 不再暴露给模型，由宿主按 Session 注入');
     const args = { user_id: 222, message: '周三见', source_ref: ref, idem_key: 'cross-request' };
     const res = await client.call('qq_send_private_msg', args);
     assert.equal(res.isError, false, res.text);
@@ -2160,10 +2177,10 @@ await test('桥接连接启动失败后可原进程恢复，错误区分数据�
       conversation: 'group:111', source_ref: 'some-source', text: '不能发送',
     });
     assert.equal(unavailable.isError, true);
-    assert.match(unavailable.text, /来源校验数据库暂不可用/);
+    assert.match(unavailable.text, /归属校验数据库暂不可用/);
     assert.equal(onebot.calls.length, before);
     const status = await client.call('qq_status');
-    assert.match(status.text, /来源校验：不可用/);
+    assert.match(status.text, /归属校验：不可用/);
     assert.match(status.text, /连接错误：/);
     fs.unlinkSync(blocker);
     fs.mkdirSync(blocker);
@@ -2180,15 +2197,15 @@ await test('桥接连接启动失败后可原进程恢复，错误区分数据�
     assert.equal(written.isError, false, written.text);
     assert.equal(JSON.parse((await client.call('qq_workspace', { ...args, action: 'read' })).text), 'OK');
     assert.equal((await client.call('qq_send_file', args)).isError, false);
-    assert.match((await client.call('qq_status')).text, /来源校验：可用/);
+    assert.match((await client.call('qq_status')).text, /归属校验：可用/);
     const count = onebot.calls.length;
     const invalid = await client.call('qq_say', { ...args, source_ref: 'unknown', text: '不能发送' });
-    assert.match(invalid.text, /source_ref 无效/);
+    assert.match(invalid.text, /本轮归属已失效/);
     assert.equal(onebot.calls.length, count);
   } finally { client.kill(); bridge?.db?.close(); }
 });
 
-await test('共享 SQLite 短暂启动写锁会等待，释放后来源校验可用', async () => {
+await test('共享 SQLite 短暂启动写锁会等待，释放后归属校验可用', async () => {
   const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
   const ref = new EpisodeLedger(bridge).origin('group:111', { qq: '222', text: '查看文件' });
   bridge.setState('qq-bridge:workspace-root', path.join(dir, 'workspace'));
@@ -2223,7 +2240,7 @@ await test('共享 SQLite 启动锁超过等待上限后，释放锁无需重启
     const result = await client.call('qq_workspace', { conversation: 'group:111', source_ref: ref, action: 'list' });
     assert.equal(result.isError, false, result.text);
     assert.deepEqual(JSON.parse(result.text), []);
-    assert.match((await client.call('qq_status')).text, /来源校验：可用/);
+    assert.match((await client.call('qq_status')).text, /归属校验：可用/);
   } finally {
     try { bridge.db.exec('ROLLBACK'); } catch {}
     client.kill(); bridge.db.close();
@@ -2311,7 +2328,7 @@ await test('取消或撤回仍拦截工作区写入与打包，不依赖开工�
   } finally {client.kill();bridge.db.close();}
 });
 
-await test('MCP sends obey shared floor, missing source cannot bypass it, replay preserves successful receipts', async () => {
+await test('MCP sends obey shared floor when a turn source is bound; replay preserves successful receipts', async () => {
   const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
   const ledger = new EpisodeLedger(bridge), ref = ledger.origin('group:111', { qq: '222', text: '画狗' });
   const policy = { version: 1, authors: ['222'], direct: true, originals: [], messageIds: ['1'] };
@@ -2321,8 +2338,9 @@ await test('MCP sends obey shared floor, missing source cannot bypass it, replay
   const client = startSayClient(bridge.path, 'send_text,send_sticker,read_favorites');
   try {
     await client.init();
-    const missing = await client.call('qq_send_group_msg', { group_id: 111, message: '绕过' });
-    assert.equal(missing.isError, true); assert.match(missing.text, /source_ref/);
+    // 没有本轮归属的手动发送不参与发言时机复核（floor 只约束回合内的工具发言）。
+    const manual = await client.call('qq_send_group_msg', { group_id: 111, message: '手动发送' });
+    assert.equal(manual.isError, false, manual.text);
     const sent = await client.call('qq_send_group_msg', { group_id: 111, source_ref: ref, message: '已确认', idem_key: 'floor-replay' });
     assert.equal(sent.isError, false, sent.text);
     bridge.setState('qq-bridge:floor:group:111', JSON.stringify({ version: 2,

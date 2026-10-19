@@ -115,7 +115,11 @@ try {
     const { store, ledger } = setup();
     const r = rig({ memoryEnabled: true }, '[SKIP]', store);
     const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, 'cross') }, store);
+    let boundDuringTurn = 0;
+    const liveBindings = () => Number(store.db.prepare(
+      "SELECT COUNT(*) AS n FROM runtime_state WHERE key LIKE 'qq-bridge:turn-session:%' AND value NOT IN ('null','')").get().n);
     r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+      boundDuringTurn = liveBindings();
       yield { type: 'snapshot', cursor: 0 };
       yield { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } };
       yield { type: 'event', event: { seq: 2, type: 'tool/call', data: { turn: 1, callId: 'c', name: 'qq_send_private_msg', arguments: JSON.stringify({ user_id: 201, message: '周三见' }) } } };
@@ -124,9 +128,11 @@ try {
       yield { type: 'event', event: { seq: 5, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } };
     } });
     await executeTurn(r.ctx, r.config, r.registry, r.state, memory, r.stats, store, 'group:10', message(1, 'deepseek 请转告201周三见'));
+    assert.equal(boundDuringTurn, 1, '回合内必须发布 Session→来源绑定，供宿主注入工具');
+    assert.equal(liveBindings(), 0, '回合结束后必须撤掉绑定，不能让迟到调用冒用旧归属');
     assert.match(recall(ledger), /QQ 200.*user:201 已发送.*周三见/);
     assert.equal(r.registry.entry('group:10').window.some((m) => m.bot), false);
-    assert.match(r.prompts[0].content[0].text, /本轮来源/); r.sendQueue.dispose();
+    assert.match(r.prompts[0].content[0].text, /【当前会话】group:10/); r.sendQueue.dispose();
   });
   await test('no database and explicit disable degrade to existing person memory', async () => {
     assert.equal(new EpisodeLedger(null).available, false);

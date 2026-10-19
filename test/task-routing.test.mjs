@@ -7,7 +7,8 @@ import { TaskRouting, configSelection } from '../lib/conversation/task-routing.m
 import { auxSelection } from '../lib/agent/aux-model.mjs';
 import { TaskScheduler } from '../lib/application/task-scheduler.mjs';
 import { taskRegistry } from '../lib/conversation/task-sessions.mjs';
-import { publishExecutionSource, closeExecutionSource, assertExecutionSource, activeExecutionSources, executionToolGuard, CROSS_CONVERSATION_STATE_KEY, sourceTtlMs } from '../lib/agent/execution-scope.mjs';
+import { publishExecutionSource, closeExecutionSource, assertExecutionSource, activeExecutionSources, executionToolGuard, CROSS_CONVERSATION_STATE_KEY, sourceTtlMs, publishTurnSession, clearTurnSession, boundSource } from '../lib/agent/execution-scope.mjs';
+import { bindToolSource } from '../lib/agent/tool-binding.mjs';
 import { fileAuthority } from '../lib/conversation/task-ownership.mjs';
 import { workspaceAction, workspaceDirectory, workspaceRoot, readWorkspaceFile } from '../lib/agent/workspace.mjs';
 import { observeFloor, checkFloor } from '../lib/conversation/floor.mjs';
@@ -502,11 +503,11 @@ try {
     assert.match(invoke('mcp__qq__qq_say', { source_ref: ref, conversation: 'group:11', text: '去别的群' }), /目标必须属于当前任务会话/);
     assert.match(invoke('mcp__qq__qq_send_group_msg', { source_ref: ref, group_id: 11, message: 'x' }), /目标必须属于当前任务会话/);
     assert.equal(invoke('mcp__qq__qq_say', { source_ref: ref, conversation: 'group:10', text: '本群' }), undefined);
-    // 打开开关后放行跨会话，但仍要求 source_ref 属于当前 Session。
+    // 打开开关后放行跨会话；归属来自 Session 注入，模型自填的 source_ref 不再参与判定。
     r.store.setState(CROSS_CONVERSATION_STATE_KEY, 'true');
     assert.equal(invoke('mcp__qq__qq_say', { source_ref: ref, conversation: 'group:11', text: '去别的群' }), undefined);
     assert.equal(invoke('mcp__qq__qq_send_group_msg', { source_ref: ref, group_id: 11, message: 'x' }), undefined);
-    assert.match(invoke('mcp__qq__qq_say', { source_ref: 'other-ref', conversation: 'group:11', text: 'x' }), /必须属于调用它的当前 DSH Session/);
+    assert.equal(invoke('mcp__qq__qq_say', { source_ref: 'other-ref', conversation: 'group:11', text: 'x' }), undefined);
     // 文件仍绑定创建它的会话工作区，跨会话开关不解除这层归属。
     assert.match(invoke('mcp__qq__qq_send_file', { source_ref: ref, conversation: 'group:11', path: 'a.zip' }), /文件属于当前 QQ 会话工作区/);
     assert.equal(invoke('mcp__qq__qq_send_file', { source_ref: ref, conversation: 'group:10', path: 'a.zip' }), undefined);
@@ -651,6 +652,49 @@ try {
     const r=make(),a=admit(r);admit(r,2,'改为蓝色',200,10,route('amend',a.task_id,['1','2']));
     r.state.taskRouting.summary(a.task_id,a,{reply:'旧结果',endReason:'completed',taskResultReady:true});
     assert.equal(r.state.taskRouting.get(a.task_id).data.summary,undefined);
+  });
+  await test('host injects the turn source so qq_poke / qq_react never need a model-supplied key', async () => {
+    const r = make({ dialogueSessionMode: 'conversation' });
+    const sessionId = await r.registry.ensureSession('group:10');
+    const e = admit(r, 1, '戳一下 GPT');
+    const ref = 'ref-poke-regression';
+    publishExecutionSource(r.store, ref, { conversation: 'group:10', taskId: e.task_id,
+      taskVersion: e.data.taskVersion, sessionId, workspaceScope: 'group:10', expiresAt: Date.now() + 600000 });
+    publishTurnSession(r.store, sessionId, { conversation: 'group:10', sourceRef: ref });
+    const invoke = (name, args) => executionToolGuard(r.store, r.config,
+      { name, arguments: args, agent: { session: { id: sessionId } } });
+    // 截图里的原故障：poke 的 schema 没有 source_ref，模型不可能填；旧 guard 因此永远拒绝。
+    assert.equal(invoke('mcp__qq__qq_poke', { group_id: 10, user_id: 200 }), undefined);
+    assert.equal(invoke('mcp__qq__qq_react', { message_id: '1', emoji_id: 128077 }), undefined);
+    // 模型乱填一个来源也不影响判定：归属只认宿主按 Session 绑定的那一条。
+    assert.equal(invoke('mcp__qq__qq_poke', { group_id: 10, user_id: 200, source_ref: 'forged' }), undefined);
+    clearTurnSession(r.store, sessionId);
+    assert.equal(boundSource(r.store, sessionId)?.sourceRef, ref, '任务回合仍可按执行来源解析归属');
+  });
+  await test('tool dispatch replaces frozen arguments with the host-injected source', async () => {
+    const r = make({ dialogueSessionMode: 'conversation' });
+    const sessionId = await r.registry.ensureSession('group:10');
+    const ref = 'ref-inject';
+    publishTurnSession(r.store, sessionId, { conversation: 'group:10', sourceRef: ref });
+    const exec = { name: 'mcp__qq__qq_poke',
+      arguments: Object.freeze({ group_id: 10, user_id: 200 }), agent: { session: { id: sessionId } } };
+    bindToolSource(r.store, exec);
+    assert.equal(exec.arguments.source_ref, ref, '宿主注入的来源必须出现在派发参数里');
+    assert.equal(exec.arguments.group_id, 10);
+    assert.deepEqual(Object.keys(exec.arguments).sort(), ['group_id', 'source_ref', 'user_id']);
+    // 模型自填的值会被覆盖，而不是被信任。
+    const forged = { name: 'mcp__qq__qq_poke',
+      arguments: Object.freeze({ group_id: 10, user_id: 200, source_ref: 'forged' }), agent: { session: { id: sessionId } } };
+    bindToolSource(r.store, forged);
+    assert.equal(forged.arguments.source_ref, ref);
+    // 非 QQ 工具和没有回合绑定的 Session 保持原参数。
+    const other = { name: 'pwsh', arguments: Object.freeze({ command: 'echo' }), agent: { session: { id: sessionId } } };
+    bindToolSource(r.store, other);
+    assert.deepEqual(other.arguments, { command: 'echo' });
+    const unbound = { name: 'mcp__qq__qq_poke', arguments: Object.freeze({ group_id: 10, user_id: 200 }),
+      agent: { session: { id: 'desktop-session' } } };
+    bindToolSource(r.store, unbound);
+    assert.equal(unbound.arguments.source_ref, undefined, '桌面会话的手动调用不伪造归属');
   });
   await test('diagnostics report bounded evidence/latencies and explicit unavailable token data', async () => {
     const r=make();admit(r,1,'秘密正文不能输出');const snapshot=r.state.taskScheduler.snapshot();
