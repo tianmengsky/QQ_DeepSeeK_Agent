@@ -29,12 +29,12 @@ const execs = all('SELECT id,conversation,owner,data FROM bridge_executions').fl
 });
 const info = execs.map((e) => {
   const ins = (e.d.inputEvents ?? []).filter((x) => !x.__inputPassive);
-  return { id: e.id, conversation: e.conversation, readOnly: Boolean(e.d.readOnly), d: e.d,
+  return { id: e.id, conversation: e.conversation, detached: Boolean(e.d.detached ?? e.d.readOnly), d: e.d,
     route: e.d.route?.action ?? null, n: ins.length,
     authors: [...new Set(ins.map((x) => String(x.user_id)))],
     at: ins.length ? Math.min(...ins.map((x) => Number(x.__receivedAt ?? Infinity))) : Infinity };
 }).filter((e) => e.n > 0 && Number.isFinite(e.at));
-const work = info.filter((e) => !e.readOnly);
+const work = info.filter((e) => !e.detached);
 
 console.log('=== 1. 每个回合携带几条输入（>1 才算真的聚合了） ===');
 const dist = new Map();

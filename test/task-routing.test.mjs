@@ -26,7 +26,7 @@ const until = async (fn, timeout = 2000) => { const start = Date.now(); while (!
 async function test(name, fn) { try { await fn(); passed++; console.log('  ✓ ' + name); } catch (e) { failed++; console.error('  ✗ ' + name, e.stack); } }
 function make(over = {}, llm = null) {
   const store = new Store(path.join(root, `${stores.length}.sqlite3`)); stores.push(store);
-  const r = rig({ groupTrigger: 'all', selfIds: ['100'], taskRoutingMode: 'enabled', taskProgressEnabled: false,
+  const r = rig({ groupTrigger: 'all', selfIds: ['100'], taskRoutingMode: 'enabled',
     floorManagementEnabled: true, replyTimeoutMs: 10000, dialogueSessionMode: 'task', ...over }, '完成了本轮回答', store, llm);
   r.store = store; r.state.replyJournal ??= replyJournal(store); rigs.push(r); return r;
 }
@@ -43,7 +43,14 @@ try {
     const r = make({ auxProvider: 'auxP', auxModel: 'auxM', llmProvider: 'mainP', llmModel: 'mainM' });
     const sel = configSelection(r.ctx, r.config);
     assert.equal(sel.provider, 'auxP'); assert.equal(sel.model, 'auxM');
-    assert.equal(sel.reasoningEffort, 'off', '短分类默认不带思考');
+    // 短分类默认档位是 'off'。除了 a6api，其他 provider（deepseek-official 等）认这个值，
+    // 必须**显式发**，否则会落到 provider 默认档（官方会话实测默认 high）继续思考。
+    assert.equal(sel.reasoningEffort, 'off', '非 a6api 的 provider 要显式发 off');
+    // a6api 的 Responses 路由拒绝任何显式档位（'off' 与默认 'max' 都报
+    // UNSUPPORTED_REASONING_EFFORT），表现为 0ms 零正文的错误结束帧 —— 只能不发这个字段。
+    const rA6 = make({ auxProvider: 'a6api', auxModel: 'auxM' });
+    const selA6 = configSelection(rA6.ctx, rA6.config);
+    assert.equal(selA6.reasoningEffort, undefined, 'a6api 必须省略思考档位字段');
     const r2 = make({ llmProvider: 'mainP', llmModel: 'mainM' });
     const sel2 = configSelection(r2.ctx, r2.config);
     assert.equal(sel2.provider, 'mainP'); assert.equal(sel2.model, 'mainM');
@@ -116,7 +123,7 @@ try {
       assert.equal(verdict.action,'query'); assert.equal(verdict.taskId,original.task_id);
     }
     const repeated=admit(r,3,'请写一份战术文档',300);
-    assert.equal(repeated.data.readOnly,true); assert.equal(repeated.data.referencedTaskId,original.task_id);
+    assert.equal(repeated.data.detached,true); assert.equal(repeated.data.referencedTaskId,original.task_id);
     assert.equal(repeated.data.authority.files,false);
     assert.equal(r.state.taskRouting.execution(original.id).state,'queued');
   });
@@ -193,7 +200,7 @@ try {
     await until(() => r.state.taskScheduler.active.size===0);
     const tasks = r.state.taskRouting.tasks('group:10'); assert.equal(tasks.length,2); assert.notEqual(tasks[0].id,tasks[1].id);
   });
-  await test('semantic progress replies bypass saturated execution capacity without interrupting the original turn', async () => {
+  await test('查询排成自己的一轮 DSH 执行，不直连模型自答也不抢走原任务', async () => {
     let original;
     const r=make({dialogueSessionMode:'conversation',taskConcurrency:1,taskConversationConcurrency:1},
       {async *stream(req){yield {type:'text-delta',text:req.system.includes('归属路由器')
@@ -204,10 +211,19 @@ try {
     try {
       original=admit(r,1,'写一篇小说');r.state.taskScheduler.pump();await until(()=>r.prompts.length===1);
       await r.handler(request(message(2,'怎么样，可以写吗？')),response());
-      await until(()=>r.calls.some(c=>c.action==='send_group_msg'));await r.sendQueue.flush();
-      assert.equal(r.state.taskRouting.execution(original.id).state,'following');assert.equal(r.prompts.length,1);
-      assert.equal(r.store.db.prepare("SELECT COUNT(*) n FROM bridge_executions WHERE json_extract(data,'$.readOnly')=1 AND state='model_finished'").get().n,1);
-    } finally {blocked.resolve();await until(()=>r.state.taskScheduler.active.size===0);}
+      assert.equal(r.state.taskRouting.execution(original.id).state,'following');
+      assert.equal(r.state.taskRouting.get(original.task_id).owner,'200','查询不接管原任务');
+      await until(()=>r.store.db.prepare("SELECT COUNT(*) n FROM bridge_executions WHERE json_extract(data,'$.detached')=1").get().n===1);
+      const pending=r.store.db.prepare("SELECT data FROM bridge_executions WHERE json_extract(data,'$.detached')=1").all();
+      assert.equal(pending.length,1,'查询要落成自己的一枚执行');
+      assert.equal(JSON.parse(pending[0].data).route.action,'query');
+      assert.equal(r.prompts.length,1,'长回合让出链路前不并发抢跑');
+    } finally {blocked.resolve();}
+    await until(()=>r.prompts.length===2);
+    await until(()=>r.store.db.prepare("SELECT COUNT(*) n FROM bridge_executions WHERE json_extract(data,'$.detached')=1 AND state='model_finished'").get().n===1);
+    await r.sendQueue.flush();
+    assert.equal(r.state.taskRouting.get(original.task_id).owner,'200');
+    await until(()=>r.state.taskScheduler.active.size===0);
   });
   await test('task Sessions persist beyond the old three-turn rotation and survive reload', async () => {
     const r = make({rotateEveryTurns:3}), e = admit(r), shared = r.registry.entry('group:10');
@@ -283,7 +299,7 @@ try {
     assert.equal(rows.length, 1, '修订要落在同一个任务上，不能新建任务');
     const exec = JSON.parse(rows[0].data);
     assert.equal(exec.route.action, 'amend');
-    assert.equal(exec.readOnly, false, 'amend 不是只读动作');
+    assert.equal(exec.detached, false, 'amend 不是脱离任务的动作');
     assert.equal(r.state.taskRouting.get(task.id).version, task.version + 1, '任务版本要 +1');
   });
 
@@ -321,6 +337,32 @@ try {
     const r=make(), e=admit(r), task=r.state.taskRouting.get(e.task_id);
     for(const p of [route('amend',task.id,['999']), {...route('amend',task.id,['1','2']),confidence:.2},route('cancel',task.id,['1','2'])])
       assert.throws(() => r.state.taskRouting.validate('group:10',message(2,'北京在哪里'),p,[task]));
+  });
+  await test('时间线引用不再让整条裁决作废，伪造 ID 仍被清掉', async () => {
+    const r=make(), e=admit(r), task=r.state.taskRouting.get(e.task_id);
+    const current=message(3,'北京天气',10,300);
+    /**
+     * '2' 是模型在提示词时间线里看到的引用证据，不是任务来源。
+     * 旧实现在 allowed 之外见一个 ID 就整条丢掉 → invalid-verdict → 白等再退回 new。
+     */
+    const fresh=r.state.taskRouting.validate('group:10',current,route('new',null,['3','2']),[task],[current],
+      {semantic:true,timelineIds:['2']});
+    assert.equal(fresh.action,'new');
+    assert.deepEqual(fresh.evidenceIds,['3','2'],'可引用的时间线 ID 保留，不属于任何一类的被清掉');
+    // 模型偶尔把数组写成字符串：宽容收下，不因此作废整条裁决。
+    const asString=r.state.taskRouting.validate('group:10',current,{...route('new',null,['3']),evidenceIds:'3'},
+      [task],[current],{semantic:true,timelineIds:['2']});
+    assert.equal(asString.action,'new');
+    // 伪造的 999 不在输入/任务来源/时间线里：清掉后没有当前消息 ID → 仍然拒。
+    assert.throws(()=>r.state.taskRouting.validate('group:10',current,route('new',null,['999']),[task],[current],
+      {semantic:true,timelineIds:['2']}));
+    // amend 的归属仍必须由任务来源 ID 证明；多引一个伪造 ID 只是被清掉。
+    const amend=r.state.taskRouting.validate('group:10',message(4,'改成蓝色',10,200),
+      route('amend',task.id,['4','1','999']),[task],[message(4,'改成蓝色',10,200)],{semantic:true,timelineIds:['2']});
+    assert.equal(amend.action,'amend');
+    assert.deepEqual(amend.evidenceIds,['4','1']);
+    assert.throws(()=>r.state.taskRouting.validate('group:10',message(5,'改成蓝色',10,200),
+      route('amend',task.id,['999']),[task],[message(5,'改成蓝色',10,200)],{semantic:true,timelineIds:['2']}));
   });
   await test('ambiguous targets clarify without executing either task', async () => {
     const r=make({}, {async *stream(){yield {type:'text-delta',text:JSON.stringify(route('clarify',null,['3']))};}});
@@ -406,7 +448,11 @@ try {
     const hanging={stream(){return {[Symbol.asyncIterator](){let timer;return {
       next:()=>new Promise(resolve=>{timer=setTimeout(()=>resolve({done:true}),1000);}),
       return:async()=>{clearTimeout(timer);return {done:true};}};}};}};
+    // 空流 = 模型什么都没返回。必须记成 empty-output 而不是 invalid-json：
+    // 线上 192 条 invalid-json 的 fallbackDetail 就是空串，把诊断全带偏了。
     const outages=[[null,'unavailable'],[{async *stream(){yield {type:'text-delta',text:'invalid JSON'};}},'invalid-json'],
+      [{async *stream(){}},'empty-output'],
+      [{async *stream(){yield {type:'reasoning-delta',text:'想了半天'};}},'empty-output'],
       [{async *stream(){throw new Error('provider unavailable');}},'stream-error'],[hanging,'timeout']];
     for(const privateChat of [false,true]) for(const [llm,expectedCause] of outages) {
       const r=make({dialogueSessionMode:'conversation',taskRouteTimeoutMs:20},llm);
@@ -421,14 +467,18 @@ try {
       await until(()=>r.prompts.length===1 && r.state.taskScheduler.active.size===0);
       await r.sendQueue.flush();
       const execution=r.state.taskRouting.execution(r.store.db.prepare('SELECT execution_id FROM bridge_input_routes WHERE message_id=?').get('2').execution_id);
-      assert.equal(execution.data.readOnly,false);assert.notEqual(execution.task_id,old.task_id);
+      assert.equal(execution.data.detached,false);assert.notEqual(execution.task_id,old.task_id);
       assert.equal(execution.conversation,key);assert.equal(execution.owner,'200');
       assert.equal(execution.data.route.reason,'semantic-route-fallback');
       assert.equal(r.stats.lastTaskRoute.reason,'semantic-route-fallback');
-      // 原因必须能区分四种故障，否则"白等 4 秒"和"本来就该失败"无从分辨。
+      // 原因必须能区分这几种故障，否则"白等 4 秒"和"本来就该失败"无从分辨。
       assert.equal(execution.data.route.fallbackCause,expectedCause);
       assert.equal(r.stats.lastTaskRoute.fallbackCause,expectedCause);
       assert.equal(typeof execution.data.route.fallbackDetail,'string');
+      // 空输出要写清"收到了什么"：分片、reasoning 段数、耗时，缺一不可。
+      if (expectedCause === 'empty-output')
+        assert.match(execution.data.route.fallbackDetail,
+          /^收到 0 段正文 \/ reasoning \d+ 段 \/ 用时 \d+ms（正文 0 字/);
       assert.deepEqual(execution.data.inputEvents.map(e=>e.message_id),[2,3]);
       assert.equal(r.state.taskRouting.get(old.task_id).version,old.data.taskVersion);
       assert.equal(r.state.taskRouting.execution(old.id).state,'recovering');
@@ -603,12 +653,38 @@ try {
     admit(r,3,'改成蓝色',200,10,route('amend',b.task_id,['2','3']));
     assert.throws(()=>assertExecutionSource(r.store,{ref:'source-b',conversation:'group:10'}));
   });
-  await test('readonly queries/clarifications never submit DSH prompts or steal task ownership', async () => {
+  await test('查询与澄清也由 DSH 回答：提交真实提示词，但不接管原任务', async () => {
     const r=make(), original=admit(r); r.state.taskRouting.setExecution(original.id,'recovering',{turnId:'long'});
     r.state.replyJournal.begin('long','group:10',{event:message(1,'写程序'),requestId:'old-rpc',sessionId:'old-session'});
     const e=admit(r,2,'进度如何',300,10,route('query',original.task_id,['1','2']));
+    assert.equal(e.data.detached,true); assert.equal(e.data.referencedTaskId,original.task_id);
+    assert.equal(e.data.authority.files,false,'脱离原任务的查询不能借用写文件权限');
     r.state.taskScheduler.pump(); await until(()=>r.state.taskRouting.execution(e.id).state==='model_finished');
-    await r.sendQueue.flush(); assert.equal(r.prompts.length,0); assert.equal(r.state.taskRouting.get(original.task_id).owner,'200');
+    await r.sendQueue.flush();
+    assert.equal(r.prompts.length,1,'查询必须经 DSH 回答，不许桥自己生成');
+    assert.equal(r.state.taskRouting.get(original.task_id).owner,'200','查询不许抢走原任务');
+    assert.equal(r.state.taskRouting.execution(original.id).state,'recovering','原执行不被改写');
+  });
+  await test('clarify 没有任务指向也建成自己的 DSH 回合，不再有无人设的旁路澄清', async () => {
+    // 线上 2026-10-20 12:18：'现在知道谁是谁了' 被判 clarify 后桥自己生成
+    // 「你指的是哪件事？请说说具体指向」。现在任何正文都必须经 DSH。
+    const r = make({}, { async *stream(req) {
+      yield { type: 'text-delta', text: /归属路由器/.test(req.system ?? '')
+        ? JSON.stringify(route('clarify', null, ['1', '2'])) : '你说的是刚才那件事吗' };
+    } });
+    const original = admit(r, 1, '写个程序');
+    r.state.taskRouting.setExecution(original.id, 'following');
+    const e = { ...message(2, '现在知道谁是谁了'), __inputId: '100:2', __receivedAt: Date.now() };
+    observeFloor(r.config, r.registry, 'group:10', e);
+    r.registry.record(r.registry.entry('group:10'),
+      { messageId: '2', qq: '200', who: '200', text: '现在知道谁是谁了', at: Date.now(), bot: false });
+    assert.equal(await r.state.taskScheduler.admit('group:10', [e]), true, '澄清也要进调度器');
+    const rows = r.store.db.prepare("SELECT data FROM bridge_executions WHERE json_extract(data,'$.detached')=1").all();
+    assert.equal(rows.length, 1);
+    assert.equal(JSON.parse(rows[0].data).route.action, 'clarify');
+    r.state.taskScheduler.pump();
+    await until(() => r.prompts.length === 1);
+    assert.equal(r.state.taskRouting.get(original.task_id).owner, '200');
   });
   await test('reload of an owned uncertain prompt never submits another model request', async () => {
     const r=make(), e=admit(r); r.state.replyJournal.begin('old','group:10',{event:message(1,'写程序'),requestId:'rpc-old',sessionId:'old-session'});
@@ -696,13 +772,44 @@ try {
     bindToolSource(r.store, unbound);
     assert.equal(unbound.arguments.source_ref, undefined, '桌面会话的手动调用不伪造归属');
   });
+  await test('inTurnInjectionMode=all 把新消息注进正在思考的回合，不调语义路由也不新建任务', async () => {
+    const r = make({ inTurnInjectionMode: 'all' }), blocked = gate();
+    r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+      yield { type: 'snapshot', cursor: 0 };
+      await blocked.promise;
+      yield { type: 'event', event: { seq: 1, type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: '本轮回答' }] } } } };
+      yield { type: 'event', event: { seq: 2, type: 'turn/end' } };
+    } });
+    try {
+      const first = admit(r, 1, '写一份战术文档');
+      r.state.taskScheduler.pump(); await until(() => r.prompts.length === 1);
+      const sessionId = r.prompts[0].sessionId;
+      const agent = { id: sessionId, status: 'running', injections: [],
+        inject(m) { this.injections.push(m); } };
+      r.ctx.agents = new Map([[sessionId, agent]]);
+      // 强制注入的意义之一就是省掉这次调用：它一旦被走到，这里会直接抛错。
+      r.ctx.llm = { stream() { throw new Error('强制注入不该调用语义路由模型'); } };
+      const follow = { ...message(2, '结尾改成开放式', 10, 300), __inputId: '100:2', __receivedAt: Date.now() };
+      observeFloor(r.config, r.registry, 'group:10', follow);
+      assert.equal(await r.state.taskScheduler.admit('group:10', [follow]), true);
+      assert.equal(agent.injections.length, 1);
+      assert.match(agent.injections[0].content[0].text, /结尾改成开放式/);
+      assert.match(agent.injections[0].source.rpcId, /^qq-interject:/);
+      assert.equal(r.prompts.length, 1, '注入不能再提交一次 prompt');
+      assert.equal(r.state.taskScheduler.active.size, 1, '同一轮仍在跑，没有新执行');
+      assert.equal(r.state.taskRouting.execution(first.id).data.inputEvents.length, 2);
+      assert.equal(r.stats.interjected, 1);
+      assert.equal(r.stats.humanInterjections, undefined, '这条不是 amend 计数');
+    } finally { blocked.resolve(); await until(() => r.state.taskScheduler.active.size === 0); }
+  });
   await test('diagnostics report bounded evidence/latencies and explicit unavailable token data', async () => {
     const r=make();admit(r,1,'秘密正文不能输出');const snapshot=r.state.taskScheduler.snapshot();
     assert.equal(snapshot.latency.routing.samples,1);assert.equal(snapshot.tokenUsage,null);assert.equal(snapshot.cacheUsage,null);
     assert.ok(!JSON.stringify(snapshot).includes('秘密正文'));assert.deepEqual(snapshot.recentRoutes[0].evidenceIds,['1']);
   });
 } finally {
-  for(const r of rigs){r.state.disposed=true;r.state.controller.abort();r.state.inputBatches?.dispose();r.state.taskProgress?.dispose();r.sendQueue.dispose();}
+  for(const r of rigs){r.state.disposed=true;r.state.controller.abort();r.state.inputBatches?.dispose();r.sendQueue.dispose();}
   await pause(30);for(const s of stores)s.db.close();globalThis.fetch=realFetch;fs.rmSync(root,{recursive:true,force:true});
 }
 console.log(`\n${passed} passed, ${failed} failed`);process.exitCode=failed?1:0;

@@ -42,18 +42,23 @@ function Reset-Mocks {
   $script:files = $true
   $script:afterSleep = $false
   $script:snowLaunches = 0
+  $script:snowStops = 0
   $script:snowExisting = $false
+  $script:snowStarted = [DateTime]::UtcNow.AddMinutes(-10)
+  $script:configWritten = [DateTime]::UtcNow
   $script:good = $true
   $Backend = 'NapCat'
 }
 # Override OS and network adapters, retaining all production decisions.
 function Test-Port([int]$Port) { $script:calls += "port:$Port"; return $script:port }
 function Get-Process {
-  param($Name, $ErrorAction)
+  param($Name, $Id, $ErrorAction)
+  if ($Id) { return @{ Id = $Id; StartTime = $script:snowStarted } }
   if (($Name -contains 'NapCatWinBootMain' -or $Name -eq 'NapCatWinBootMain') -and $script:injected) { return @{ Id = 1 } }
   if (($Name -contains 'QQ' -or $Name -eq 'QQ') -and $script:qq) { return @{ Id = 2 } }
 }
-function Stop-Process { throw 'TEST VIOLATION: stopping live processes is forbidden' }
+function Stop-Process { param($Id) $script:calls += "stop:$Id"; $script:snowStops++; $script:port = $false; $script:online = $false }
+function Get-Item { param($LiteralPath) return @{ LastWriteTimeUtc = $script:configWritten } }
 function Test-Path { param($LiteralPath) return $script:files }
 function Join-Path { param($Path, $ChildPath) return "$Path\$ChildPath" }
 function Get-Content {
@@ -86,8 +91,8 @@ function Invoke-CimMethod {
   return @{ ReturnValue = 0; ProcessId = 100 }
 }
 function Start-Sleep { param($Seconds) $script:sleeps++; if ($script:afterSleep) { $script:port = $true; $script:online = $true } }
-function Get-BridgeProcesses { param($Names) if ($script:snowExisting) { return @{ Name = 'node.exe'; CommandLine = "$PSScriptRoot\start-snowluma.mjs" } } }
-function Start-SnowLumaService { $script:snowLaunches++; $script:afterSleep = $true }
+function Get-BridgeProcesses { param($Names) if ($script:snowExisting) { return @{ Name = 'node.exe'; ProcessId = 4242; CommandLine = "$PSScriptRoot\start-snowluma.mjs $SnowLumaDir 3667925015" } } }
+function Start-SnowLumaService { $script:snowLaunches++; $script:port = $true; $script:online = $true; $script:afterSleep = $true }
 function Test($name, $body) {
   Reset-Mocks
   & $body
@@ -188,6 +193,21 @@ Test 'existing SnowLuma is awaited without duplicate launch' {
   Assert (Ensure-SnowLuma) 'existing SnowLuma ignored'
   Assert ($script:snowLaunches -eq 0 -and $script:launches -eq 0) 'duplicate service'
 }
+Test 'stale SnowLuma config restarts only the hook' {
+  $Backend = 'SnowLuma'; $script:port = $true; $script:online = $true; $script:snowExisting = $true
+  $script:snowStarted = [DateTime]::UtcNow.AddMinutes(-10)
+  $script:configWritten = [DateTime]::UtcNow
+  Assert (Ensure-SnowLuma) 'stale SnowLuma was reused'
+  Assert ($script:snowStops -eq 1) 'stale hook was not stopped'
+  Assert ($script:snowLaunches -eq 1) 'hook was not restarted'
+}
+Test 'fresh SnowLuma config is reused without restart' {
+  $Backend = 'SnowLuma'; $script:port = $true; $script:online = $true; $script:snowExisting = $true
+  $script:snowStarted = [DateTime]::UtcNow
+  $script:configWritten = [DateTime]::UtcNow.AddMinutes(-10)
+  Assert (Ensure-SnowLuma) 'SnowLuma not reused'
+  Assert ($script:snowStops -eq 0 -and $script:snowLaunches -eq 0) 'matching config was restarted'
+}
 Test 'SnowLuma account-specific credential is selected' {
   $Backend = 'SnowLuma'
   Assert ((Get-OneBotHeaders).Authorization -eq 'Bearer snow-token') 'SnowLuma credential not selected'
@@ -197,5 +217,9 @@ Test 'unhealthy transport does not enable hosting' {
   Assert (-not (Start-All)) 'unhealthy transport accepted'
   Assert ($script:controls.Count -eq 0 -and $script:snowLaunches -eq 0) 'unhealthy transport changed'
 }
-Assert (-not ($source -match '(?m)^\s*(Stop-Process|taskkill)\b')) 'process killing remains in launcher'
+$restartHelper = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Restart-SnowLumaService' }, $false) | Select-Object -First 1
+Assert ($restartHelper) 'controlled SnowLuma restart helper missing'
+$outsideRestart = $source.Replace($restartHelper.Extent.Text, '')
+Assert (-not ($outsideRestart -match '(?m)^\s*Stop-Process\b')) 'process killing escaped the controlled SnowLuma restart'
+Assert (-not ($source -match '(?m)^\s*taskkill\b')) 'taskkill remains in launcher'
 Write-Host "$script:passed passed, 0 failed"

@@ -10,8 +10,10 @@ param(
   [string]$Backend = 'SnowLuma',
   [string]$SnowLumaDir = (Join-Path $PSScriptRoot '..\..\SnowLuma-validation\runtime'),
   [string]$QQPath = 'C:\Program Files\Tencent\QQNT\QQ.exe',
-  [string]$Bridge = 'http://127.0.0.1:19387/qq/onebot',
-  [string]$OneBot = 'http://127.0.0.1:3000',
+  # 桥接地址**留空 = 自动发现**。桥接挂在 DSH 自己的 HTTP 服务上，DSH 端口每次启动
+  # 都可能变（实测 19387 → 5250），写死一个值会变成"桥接未响应，保留当前 QQ 状态"。
+  [string]$Bridge = '',
+  [string]$OneBot = 'http://127.0.0.1:16000',
   [string]$Token = '',
   [string]$BridgeToken = ''
 )
@@ -104,6 +106,58 @@ function Get-BridgeStatus {
   catch { return $null }
 }
 
+# 桥接探测：返回带 ok / agentEnabled 的 JSON 才算真的接上了。
+# 只要求"端口能连"不够 —— 其它服务也会回 200。
+function Test-BridgeUrl([string]$url) {
+  try {
+    $headers = @{}
+    if ($BridgeToken) { $headers.Authorization = "Bearer $BridgeToken" }
+    $res = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 2 -ErrorAction Stop
+    if ($res -and ($null -ne $res.ok -or $null -ne $res.agentEnabled)) { return $res }
+  } catch { }
+  return $null
+}
+
+# 自动发现桥接地址。
+#
+# 桥接不是独立端口，而是挂在 DSH 的 HTTP 服务上（path: /qq/onebot），
+# 所以 DSH 换端口它就跟着换。这里按「显式参数 → 环境变量 → 常见端口 → 全部本机监听端口」
+# 的顺序探测，找到第一个真的回桥接 JSON 的地址。
+function Resolve-BridgeUrl {
+  if ($Bridge) {
+    if (Test-BridgeUrl $Bridge) { return $Bridge }
+    Bad "指定的桥接地址无响应：$Bridge（继续自动发现）"
+  }
+  $candidates = @()
+  if ($env:QQ_BRIDGE) { $candidates += $env:QQ_BRIDGE }
+  $candidates += 'http://127.0.0.1:19387/qq/onebot', 'http://127.0.0.1:5250/qq/onebot'
+  $ports = @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+    Where-Object { $_.Port -ge 1024 } |
+    Select-Object -ExpandProperty Port -Unique | Sort-Object)
+  foreach ($port in $ports) { $candidates += "http://127.0.0.1:$port/qq/onebot" }
+  foreach ($url in ($candidates | Select-Object -Unique)) {
+    if (Test-BridgeUrl $url) { return $url }
+  }
+  return ''
+}
+
+# 把 SnowLuma 的 OneBot 上报地址同步成当前桥接地址。
+#
+# SnowLuma 的 httpClients 是写死在配置文件里的，没法自己发现 DSH 端口；
+# 不同步的后果是「QQ 消息收不到」——桥接在线、QQ 在线，但事件发去了旧端口。
+# 只改 url 那一行，保留文件其余内容；写回必须是**无 BOM** 的 UTF-8。
+function Sync-SnowLumaBridgeUrl([string]$url) {
+  $file = Join-Path $SnowLumaDir "config\onebot_$Uin.json"
+  if (-not (Test-Path -LiteralPath $file)) { return }
+  $raw = Get-Content -LiteralPath $file -Raw -Encoding UTF8
+  $updated = [regex]::Replace($raw, '"url"\s*:\s*"[^"]*?/qq/onebot"', '"url": "' + $url + '"')
+  if ($updated -ne $raw) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($file, $updated, $utf8NoBom)
+    Info "已把 SnowLuma 上报地址同步为 $url"
+  }
+}
+
 function Set-Hosting([bool]$Enabled) {
   try {
     $headers = @{}
@@ -174,11 +228,60 @@ function Start-SnowLumaService {
   Ok 'SnowLuma 已启动，自动接入已识别的机器人账号；个人 QQ 不注入'
 }
 
+function Get-SnowLumaProcesses {
+  return @(Get-BridgeProcesses -Names @('node') | Where-Object {
+    $_.Name -eq 'node.exe' -and $_.CommandLine -and
+      $_.CommandLine.Contains((Join-Path $PSScriptRoot 'start-snowluma.mjs')) -and
+      $_.CommandLine.Contains($SnowLumaDir)
+  })
+}
+
+# 配置文件比 SnowLuma 进程新，说明运行中的 hook 还没加载当前配置。
+# 不能只看文件里的 url：上一次失败的启动可能已经把文件改新了，进程仍是旧的。
+function Test-SnowLumaNeedsReload {
+  $processes = @(Get-SnowLumaProcesses)
+  if ($processes.Count -eq 0) { return $false }
+  $file = Join-Path $SnowLumaDir "config\onebot_$Uin.json"
+  if (-not (Test-Path -LiteralPath $file)) { return $false }
+  $written = (Get-Item -LiteralPath $file).LastWriteTimeUtc
+  foreach ($process in $processes) {
+    try {
+      if ((Get-Process -Id $process.ProcessId).StartTime.ToUniversalTime() -lt $written) { return $true }
+    } catch { }
+  }
+  return $false
+}
+
+# 只重启 SnowLuma 的 Node hook，不结束 QQ。hook 会重新接上同一个 QQ 进程。
+function Restart-SnowLumaService {
+  $processes = @(Get-SnowLumaProcesses)
+  if ($processes.Count -eq 0) { return $true }
+  Info 'SnowLuma 进程早于配置文件，重启 hook 以加载新上报地址（QQ 进程保持运行）...'
+  foreach ($process in $processes) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
+  $deadline = (Get-Date).AddSeconds(15)
+  while ((Test-Port ([uri]$OneBot).Port) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+  if (Test-Port ([uri]$OneBot).Port) {
+    Bad 'SnowLuma 已停止，但 OneBot 端口仍被占用，未继续启动。'
+    return $false
+  }
+  Start-SnowLumaService
+  if (-not (Wait-OneBot)) { return $false }
+  Ok 'SnowLuma 已重启'
+  return $true
+}
+
 function Ensure-SnowLuma {
   Info '检查 OneBot 接口及 SnowLuma 进程...'
   if (Test-Port ([uri]$OneBot).Port) {
     $state = Get-OneBotState
-    if ($state.online) { Ok "复用在线账号 $($state.account.user_id)"; return $true }
+    if ($state.online) {
+      # DSH 换端口后，启动器只改文件；这里把运行中的旧 hook 换成新地址。
+      if (Test-SnowLumaNeedsReload) {
+        if (-not (Restart-SnowLumaService)) { return $false }
+      }
+      Ok "复用在线账号 $($state.account.user_id)"
+      return $true
+    }
     Bad $state.error
     return $false
   }
@@ -240,7 +343,12 @@ function Ensure-NapCat {
 
 function Start-All {
   Info '检查 DSH 桥接...'
+  if (-not $Bridge) { Bad 'DSH 桥接未响应，保留当前 QQ 状态。'; return $false }
+  # 发现之后还要真的验一次：桥接可能在发现与启动之间退出。
   if (-not (Get-BridgeStatus)) { Bad 'DSH 桥接未响应，保留当前 QQ 状态。'; return $false }
+  Info "桥接：$Bridge"
+  # 先把 SnowLuma 的上报地址对上，再起服务；否则起来了也收不到群消息。
+  Sync-SnowLumaBridgeUrl $Bridge
   if (-not (Ensure-Transport)) { return $false }
   if (-not (Set-Hosting $true)) { return $false }
   Ok '托管已开启，QQ 登录进程保持独立运行'
@@ -260,13 +368,26 @@ try {
     if (-not $ownsLock) { throw '已有启动操作正在执行，请等待它完成；不会重复启动 QQ。' }
   }
   $Uin = Resolve-LoginAccount
+  # DSH 的端口每次启动可能不同（桥接跟着它走），所以先发现再动手；
+  # 找不到就明确说出来，不要拿旧端口去猜。
+  $resolvedBridge = Resolve-BridgeUrl
+  if ($resolvedBridge) {
+    $script:Bridge = $resolvedBridge
+    Info "桥接：$Bridge"
+  } else {
+    Bad '未找到 DSH 桥接（DSH 没启动时正常）：没有可用的 /qq/onebot'
+  }
   $success = $true
   switch ($Mode) {
     'status' { Show-Status }
     'stop' { $success = Set-Hosting $false }
     'restart' {
-      # 先确认账号仍在线，再重置托管；服务故障不破坏已有 QQ 会话。
-      if (-not (Get-BridgeStatus) -or -not (Ensure-Transport)) { $success = $false; break }
+      # 先确认桥接和账号都在，再重置托管；服务故障不破坏已有 QQ 会话。
+      if (-not $Bridge -or -not (Get-BridgeStatus)) {
+        Bad 'DSH 桥接未响应，不做任何改动。'; $success = $false; break
+      }
+      Sync-SnowLumaBridgeUrl $Bridge
+      if (-not (Ensure-Transport)) { $success = $false; break }
       if (-not (Set-Hosting $false)) { $success = $false; break }
       $success = Set-Hosting $true
       if ($success) { Ok '桥接托管已重置；QQ 保持在线。MCP 进程由 DSH 管理。' }

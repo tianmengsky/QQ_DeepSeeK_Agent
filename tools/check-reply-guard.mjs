@@ -30,7 +30,7 @@ const PHATIC = /^(?:[？?！!。,.、~～\s]*|[哈呵嘿草6６靠额emmo…]+|[
 
 const work = db.prepare('SELECT data FROM bridge_executions').all().flatMap((r) => {
   let d; try { d = JSON.parse(r.data); } catch { return []; }
-  if (d.readOnly) return [];
+  if (d.detached || d.readOnly) return [];
   return (d.inputEvents ?? []).filter((x) => !x.__inputPassive).map((x) => ({
     at: Number(x.__receivedAt ?? NaN),
     hasAt: Array.isArray(x.message) && x.message.some((p) => p?.type === 'at'),

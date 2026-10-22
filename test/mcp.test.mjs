@@ -17,12 +17,15 @@ import { createRequire } from 'node:module';
 import { Store } from '../lib/store.mjs';
 import { EpisodeLedger } from '../lib/memory/episodes.mjs';
 import { CHAT_TOOLS, ADMIN_TOOLS, QQ_SESSION_TOOLS } from '../lib/agent/tool-sets.mjs';
-import { publishFloorSource } from '../lib/conversation/floor.mjs';
+import { publishFloorSource, recordFloorRecall } from '../lib/conversation/floor.mjs';
+import { publishImageCatalog } from '../lib/agent/image-catalog.mjs';
 import { TaskRouting } from '../lib/conversation/task-routing.mjs';
-import { publishExecutionSource } from '../lib/agent/execution-scope.mjs';
+import { publishExecutionSource, publishTurnSession } from '../lib/agent/execution-scope.mjs';
+import { bindToolSource } from '../lib/agent/tool-binding.mjs';
 
 /** 造测试用的桥接库需要同步的 node:sqlite。 */
 const require = createRequire(import.meta.url);
+const forwardPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=', 'base64');
 
 let passed = 0;
 let failed = 0;
@@ -69,6 +72,12 @@ function startFakeOnebot() {
     notices: [],
   };
   const server = http.createServer((req, res) => {
+    if (req.url.startsWith('/forward-image/')) {
+      calls.push({ action: 'download_forward_image', params: { url: req.url } });
+      res.writeHead(req.url.endsWith('/missing') ? 404 : 200, { 'content-type': 'image/png' });
+      res.end(req.url.endsWith('/large') ? Buffer.alloc(4 * 1024 * 1024 + 1) : forwardPng);
+      return;
+    }
     // 图片端点：不解析 JSON，直接回字节。
     // 用请求路径派生内容，这样不同 URL 会得到不同的 sha256。
     if (req.url.startsWith('/img/')) {
@@ -207,11 +216,14 @@ function startFakeOnebot() {
         );
       }
       if (action === 'get_forward_msg') {
+        if (onebot.forwardNodes) return reply({ messages: onebot.forwardNodes });
         return reply({ messages: Array.from({ length: 45 }, (_, i) => ({
           sender: { user_id: 200 + i, nickname: `节点${i}` },
           content: [{ type: 'text', data: { text: `转发内容 ${i}` } }],
         })) });
       }
+      if (action === 'get_image' && params.file === 'forward-local')
+        return reply({ file: onebot.forwardImageFile });
       if (action === 'get_msg') {
         return reply({ message: [{ type: 'forward', data: { id: 'quoted-forward' } }] });
       }
@@ -235,6 +247,27 @@ function startFakeOnebot() {
       }
       if (action === 'send_group_msg' || action === 'send_private_msg') {
         return reply({ message_id: calls.length });
+      }
+      // ---- QQ 内置 AI 语音（SnowLuma send_group_ai_record / get_ai_characters）
+      if (action === 'get_ai_characters') {
+        if (params.group_id === 444) return reply([]);
+        return reply([
+          { type: '热门', characters: [
+            { character_id: '1001', character_name: '小微', preview_url: 'http://x/1.mp3' },
+            { character_id: '1002', character_name: '子墨', preview_url: 'http://x/2.mp3' },
+          ] },
+          { type: '国风', characters: [
+            { character_id: '2001', character_name: '青黛', preview_url: 'http://x/3.mp3' },
+          ] },
+        ]);
+      }
+      if (action === 'send_group_ai_record') {
+        if (params.text === '语音未知') return reply({});
+        if (params.text === '语音被拒') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ status: 'failed', retcode: 1400, message: 'AI 语音被拒绝' }));
+        }
+        return reply({ message_id: 70000 + calls.length });
       }
       if (action === 'upload_group_file' || action === 'upload_private_file') {
         if (params.name === 'unknown.html') return reply({});
@@ -400,6 +433,105 @@ await test('QQ_TOOLSET=chat 真实协议仅暴露聊天工具，能力授权仍�
   } finally { client.kill(); }
 });
 
+await test('qq_read_image 懒列目录，按序读取当前/历史/引用多图，宿主绑定防止跨会话读取', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  const ledger = new EpisodeLedger(bridge), conversation = 'group:111';
+  const ref = ledger.origin(conversation, { qq: '222', messageId: 'image-source', text: '比较这些图' });
+  const other = ledger.origin('group:222', { qq: '333', messageId: 'foreign', text: '另一个群' });
+  const sharp = createRequire(new URL('../qq-mcp/package.json', import.meta.url))('sharp');
+  const bytes = await Promise.all([0, 1, 2].map((i) => sharp({ create: { width: 2, height: 2, channels: 3,
+    background: { r: i * 100, g: 10, b: 20 } } }).png().toBuffer()));
+  const images = bytes.map((buffer, i) => {
+    const file = path.join(dir, `picture-${i}.png`); fs.writeFileSync(file, buffer);
+    return { type: 'image', data: { file } };
+  });
+  const rows = [
+    { messageId: 'history', source: 'history', who: '早先用户', images, attached: [2] },
+    { messageId: 'image-source', source: 'current', images: [images[2]], attached: [0] },
+    { messageId: 'quoted', source: 'quote', images: [images[1]], attached: [] },
+    { messageId: 'missing', source: 'history', images: [{ type: 'image', data: { file: 'missing-image.png' } }] },
+  ];
+  publishImageCatalog(bridge, ref, conversation, rows);
+  publishImageCatalog(bridge, other, 'group:222', [{ messageId: 'foreign', images }]);
+  publishTurnSession(bridge, 'real-session', { conversation, sourceRef: ref });
+  const client = startMcp({ ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`,
+    QQ_STATE_DIR: dir, QQ_BRIDGE_DB: bridge.path, QQ_TOOLSET: 'chat', QQ_CAPABILITIES: 'read_image' });
+  try {
+    await client.init();
+    const schema = (await client.listTools()).find((t) => t.name === 'qq_read_image');
+    assert.ok(schema); assert.equal(schema.inputSchema.properties.source_ref, undefined);
+    const before = onebot.calls.length;
+    const listing = await client.call('qq_read_image', { source_ref: ref });
+    assert.equal(listing.isError, false, listing.text);
+    assert.deepEqual(JSON.parse(listing.text).messages.slice(0, 3).map((m) => m.image_count), [3, 1, 1]);
+    assert.deepEqual(JSON.parse(listing.text).messages[0].attached_indices, [2]);
+    assert.equal(onebot.calls.length, before);
+    for (const i of [0, 1, 2]) {
+      const result = await client.call('qq_read_image', { source_ref: ref, message_id: 'history', image_index: i });
+      assert.equal(result.isError, false, result.text);
+      assert.deepEqual(Buffer.from(result.raw.content.find((c) => c.type === 'image').data, 'base64'), bytes[i]);
+      assert.equal(JSON.parse(result.text).next_image_index, i < 2 ? i + 1 : null);
+    }
+    for (const [messageId, index] of [['image-source', 2], ['quoted', 1]]) {
+      const result = await client.call('qq_read_image', { source_ref: ref, message_id: messageId });
+      assert.equal(result.isError, false, result.text);
+      assert.deepEqual(Buffer.from(result.raw.content.find((c) => c.type === 'image').data, 'base64'), bytes[index]);
+    }
+    const reread = JSON.parse((await client.call('qq_read_image', { source_ref: ref })).text).messages;
+    assert.deepEqual(reread[0].read_indices, [0, 1, 2]);
+    assert.deepEqual(reread[3].read_indices, []);
+    const exec = { name: 'mcp__qq__qq_read_image', agent: { session: { id: 'real-session' } },
+      arguments: { source_ref: other, message_id: 'foreign' } };
+    bindToolSource(bridge, exec);
+    assert.equal(exec.arguments.source_ref, ref);
+    const beforeDenied = onebot.calls.length;
+    for (const args of [exec.arguments, { source_ref: ref, message_id: 'unrelated' },
+      { source_ref: 'unknown', message_id: 'history' }, { message_id: 'history' },
+      ...[-1, 0.5, 3, '1'].map((image_index) => ({ source_ref: ref, message_id: 'history', image_index })),
+      { source_ref: ref, image_index: 0 }])
+      assert.equal((await client.call('qq_read_image', args)).isError, true, JSON.stringify(args));
+    assert.equal(onebot.calls.length, beforeDenied);
+    const failed = await client.call('qq_read_image', { source_ref: ref, message_id: 'missing' });
+    assert.equal(failed.isError, true); assert.match(failed.text, /未加载/);
+    recordFloorRecall(bridge, conversation, 'history');
+    assert.equal((await client.call('qq_read_image', { source_ref: ref, message_id: 'history' })).isError, true);
+    assert.equal(JSON.parse((await client.call('qq_read_image', { source_ref: ref })).text).messages.some((m) => m.message_id === 'history'), false);
+    ledger.retract(conversation, 'image-source');
+    assert.equal((await client.call('qq_read_image', { source_ref: ref })).isError, true);
+  } finally { client.kill(); bridge.db.close(); }
+});
+
+await test('qq_read_image 遵守能力位、白名单、失效目录与单小时图片配额', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  const ref = new EpisodeLedger(bridge).origin('group:111', { qq: '222', messageId: 'source', text: '看图' });
+  const file = path.join(dir, 'picture.png'); fs.writeFileSync(file, forwardPng);
+  const rows = [{ messageId: 'source', images: [{ type: 'image', data: { file } }] }];
+  const env = { ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`, QQ_STATE_DIR: dir,
+    QQ_BRIDGE_DB: bridge.path, QQ_TOOLSET: 'chat', QQ_CAPABILITIES: 'read_image' };
+  let client;
+  try {
+    publishImageCatalog(bridge, ref, 'group:111', rows);
+    for (const overrides of [{ QQ_CAPABILITIES: 'send_text' }, { QQ_ALLOW_GROUPS: '222' }]) {
+      client = startMcp({ ...env, ...overrides }); await client.init();
+      const before = onebot.calls.length;
+      assert.equal((await client.call('qq_read_image', { source_ref: ref, message_id: 'source' })).isError, true);
+      assert.equal(onebot.calls.length, before); client.kill();
+    }
+    client = startMcp({ ...env, QQ_QUOTA_IMAGE_PER_HOUR: '1' }); await client.init();
+    assert.equal((await client.call('qq_read_image', { source_ref: ref, message_id: 'source' })).isError, false);
+    assert.equal((await client.call('qq_read_image', { source_ref: ref })).isError, false);
+    const quota = await client.call('qq_read_image', { source_ref: ref, message_id: 'source' });
+    assert.equal(quota.isError, true); assert.match(quota.text, /配额/);
+    publishImageCatalog(bridge, ref, 'group:111', []);
+    assert.equal(JSON.parse((await client.call('qq_read_image', { source_ref: ref })).text).messages.length, 0);
+    assert.equal((await client.call('qq_read_image', { source_ref: ref, message_id: 'source' })).isError, true);
+    publishImageCatalog(bridge, ref, 'group:222', rows);
+    assert.equal((await client.call('qq_read_image', { source_ref: ref })).isError, true);
+    publishImageCatalog(bridge, ref, 'group:111', rows, -1);
+    assert.equal((await client.call('qq_read_image', { source_ref: ref })).isError, true);
+  } finally { client?.kill(); bridge.db.close(); }
+});
+
 await test('qq_read_forward 只按本轮来源分页读取，并拒绝越权 forward_id', async () => {
   const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
   const ledger = new EpisodeLedger(bridge), conversation = 'group:111';
@@ -441,6 +573,78 @@ await test('qq_read_forward 会核对引用消息中的转发归属', async () =
     assert.equal(res.isError, false, res.text);
     assert.equal(JSON.parse(res.text).nodes[0].index, 0);
   } finally { client.kill(); bridge.db.close(); }
+});
+
+await test('转发图片按节点懒读取：分页不下载，单次返回真实图片，支持后页及 message 格式', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  const ref = new EpisodeLedger(bridge).origin('group:111', { qq: '222', messageId: 'media-source', text: '看图' });
+  bridge.recordEvent({ conversation: 'group:111', kind: 'inbound', payload: {
+    messageId: 'media-source', forwards: [{ type: 'forward', data: { id: 'media-forward' } }],
+  }, deliverable: false });
+  onebot.forwardImageFile = path.join(dir, 'forward.png');
+  fs.writeFileSync(onebot.forwardImageFile, forwardPng);
+  onebot.forwardNodes = Array.from({ length: 25 }, (_, i) => ({
+    sender: { user_id: 222, nickname: '原作者' },
+    message: i === 21 ? [{ type: 'image', data: { url: `http://127.0.0.1:${onebot.port}/forward-image/valid` } }]
+      : i === 0 ? [{ type: 'image', data: { file: 'forward-local' } },
+        { type: 'image', data: { url: `http://127.0.0.1:${onebot.port}/forward-image/missing` } },
+        { type: 'image', data: { url: `http://127.0.0.1:${onebot.port}/forward-image/large` } }]
+      : [{ type: 'text', data: { text: '文字节点' } }],
+  }));
+  const env = { ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`, QQ_STATE_DIR: dir,
+    QQ_BRIDGE_DB: bridge.path, QQ_TOOLSET: 'chat', QQ_CAPABILITIES: 'read_forward,read_image' };
+  let client = startMcp(env);
+  const args = { source_ref: ref, forward_id: 'media-forward' };
+  try {
+    await client.init();
+    const before = onebot.calls.length;
+    const page = await client.call('qq_read_forward', args);
+    assert.equal(page.isError, false, page.text);
+    assert.equal(JSON.parse(page.text).nodes[0].image_count, 3);
+    assert.equal(page.raw.content.some((c) => c.type === 'image'), false);
+    assert.equal(onebot.calls.slice(before).some((c) => ['get_image', 'download_forward_image'].includes(c.action)), false);
+    const local = await client.call('qq_read_forward', { ...args, node_index: 0 });
+    assert.equal(local.isError, false, local.text);
+    const pixels = local.raw.content.filter((c) => c.type === 'image');
+    assert.equal(pixels.length, 1);
+    assert.equal(pixels[0].mimeType, 'image/png');
+    assert.deepEqual(Buffer.from(pixels[0].data, 'base64'), forwardPng);
+    assert.match(local.text, /原作者/);
+    const later = JSON.parse((await client.call('qq_read_forward', { ...args, offset: 20 })).text);
+    assert.equal(later.nodes.find((n) => n.index === 21).image_count, 1);
+    const remote = await client.call('qq_read_forward', { ...args, node_index: 21, image_index: 0 });
+    assert.equal(remote.isError, false, remote.text);
+    assert.deepEqual(Buffer.from(remote.raw.content.find((c) => c.type === 'image').data, 'base64'), forwardPng);
+    const quotedRef = new EpisodeLedger(bridge).origin('group:111', { qq: '222', messageId: 'media-quote', text: '看引用里的图' });
+    bridge.recordEvent({ conversation: 'group:111', kind: 'inbound', payload: {
+      messageId: 'media-quote', forwards: [], replyToId: 'quoted-msg',
+    }, deliverable: false });
+    const quotedImage = await client.call('qq_read_forward', {
+      source_ref: quotedRef, forward_id: 'quoted-forward', node_index: 0, image_index: 0,
+    });
+    assert.equal(quotedImage.isError, false, quotedImage.text);
+    assert.equal(quotedImage.raw.content.filter((c) => c.type === 'image').length, 1);
+    for (const invalid of [{ node_index: -1 }, { node_index: 0.5 }, { image_index: 0 },
+      { node_index: 100 }, { node_index: 1 }, { node_index: 0, image_index: 99 },
+      { node_index: 0, image_index: 1 }, { node_index: 0, image_index: 2 }]) {
+      const result = await client.call('qq_read_forward', { ...args, ...invalid });
+      assert.equal(result.isError, true, JSON.stringify(invalid));
+      assert.equal(result.raw.content.some((c) => c.type === 'image'), false);
+    }
+    const count = onebot.calls.length;
+    assert.equal((await client.call('qq_read_forward', { ...args, forward_id: 'unrelated', node_index: 0 })).isError, true);
+    assert.equal(onebot.calls.length, count);
+    const invalidSource = await client.call('qq_read_forward', { ...args, source_ref: 'unknown', node_index: 0 });
+    assert.equal(invalidSource.isError, true);
+    assert.equal(onebot.calls.length, count);
+    client.kill();
+    client = startMcp({ ...env, QQ_CAPABILITIES: 'read_forward' });
+    await client.init();
+    const denied = await client.call('qq_read_forward', { ...args, node_index: 0 });
+    assert.equal(denied.isError, true);
+    assert.match(denied.text, /read_image/);
+    assert.equal(onebot.calls.length, count);
+  } finally { client.kill(); onebot.forwardNodes = null; onebot.forwardImageFile = null; bridge.db.close(); }
 });
 
 await test('QQ_TOOLSET=chat,admin 把群管理与改资料一并暴露（2026-10-12）', async () => {
@@ -2480,6 +2684,110 @@ await test('跨会话开关：默认拒绝跨群，打开后按目标会话放�
     const bad = await client.call('qq_say', { conversation: 'group:abc', source_ref: ref, text: 'x' });
     assert.equal(bad.isError, true);
   } finally { client.kill(); store.db.close(); }
+});
+
+console.log('\nQQ 内置 AI 语音: 固定音色 / 发送 / 能力位 / 幂等');
+
+await test('不向模型暴露音色接口：没有列表工具，也没有 character 参数', async () => {
+  const dir = tmpDir();
+  const client = startMcp({
+    ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`,
+    QQ_STATE_DIR: dir,
+    QQ_TOOLSET: 'chat',
+    QQ_CAPABILITIES: 'send_sticker',
+  });
+  try {
+    await client.init();
+    const tools = await client.listTools();
+    assert.equal(tools.some((t) => t.name === 'qq_list_ai_voices'), false, '音色列表不应开放给模型');
+    const voice = tools.find((t) => t.name === 'qq_send_ai_voice');
+    assert.ok(voice, '发送工具要在');
+    assert.equal('character' in (voice.inputSchema.properties ?? {}), false, '模型不能指定音色');
+    assert.match(voice.description, /傲娇少女/, '工具描述要说清音色固定');
+    // 列音色是旧行为，现在发送前不该再查一次
+    assert.equal(onebot.calls.some((c) => c.action === 'get_ai_characters'), false);
+  } finally { client.kill(); }
+});
+
+await test('qq_send_ai_voice 固定用傲娇少女，记账语音并刷新唤醒窗口', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  bridge.setState('qq-bridge:episodic-memory', 'true');
+  const client = startSayClient(bridge.path, 'send_sticker');
+  try {
+    await client.init();
+    const before = onebot.calls.length;
+    const sent = await client.call('qq_send_ai_voice', {
+      group_id: 111, text: '今天风好大', idem_key: 'voice-1',
+    });
+    assert.equal(sent.isError, false, sent.text);
+    assert.equal(sent.raw.structuredContent.receipt.status, 'SUCCEEDED');
+    assert.equal(onebot.calls.length, before + 1);
+    const call = onebot.calls.at(-1);
+    assert.equal(call.action, 'send_group_ai_record');
+    assert.deepEqual({ ...call.params },
+      { group_id: 111, character: 'lucy-voice-f38', text: '今天风好大', chat_type: 1 });
+    assert.match(sent.text, /傲娇少女/);
+    assert.ok(bridge.getState('qq-bridge:speech:group:111'), '成功发送必须刷新唤醒窗口');
+    assert.ok(
+      bridge.readEvents('group:111', { latest: true }).messages.some(
+        (m) => m.kind === 'self_message' && m.payload.text === '[语音：今天风好大]'),
+      '历史里要记成 [语音：…]，不能只剩一个占位',
+    );
+
+    const replay = await client.call('qq_send_ai_voice', {
+      group_id: 111, text: '今天风好大', idem_key: 'voice-1',
+    });
+    assert.match(replay.text, /幂等重放/);
+    assert.equal(onebot.calls.length, before + 1);
+  } finally { client.kill(); bridge.db.close(); }
+});
+
+await test('语音能力位、固定音色的兜底与文本上限', async () => {
+  const dir = tmpDir();
+  const denied = startSayClient(path.join(dir, 'denied.sqlite3'), 'read_group_info');
+  try {
+    await denied.init();
+    const res = await denied.call('qq_send_ai_voice', { group_id: 111, text: '喂' });
+    assert.equal(res.isError, true);
+    assert.match(res.text, /send_voice/);
+  } finally { denied.kill(); }
+
+  const client = startSayClient(path.join(dir, 'ok.sqlite3'), 'send_voice');
+  try {
+    await client.init();
+    // 就算模型硬塞 character（绕过 schema），也只能用固定音色。
+    const forced = await client.call('qq_send_ai_voice', { group_id: 111, text: '喂', character: '1002' });
+    assert.equal(forced.isError, false, forced.text);
+    assert.equal(onebot.calls.at(-1).params.character, 'lucy-voice-f38');
+
+    // 超长文本直接拒绝，且不得产生任何发送
+    const before = onebot.calls.length;
+    const long = await client.call('qq_send_ai_voice', { group_id: 111, text: '啊'.repeat(201) });
+    assert.equal(long.isError, true);
+    assert.match(long.text, /超过上限/);
+    assert.equal(onebot.calls.length, before);
+  } finally { client.kill(); }
+});
+
+await test('AI 语音结果未知时记 UNKNOWN：不刷新窗口、不许自动重发', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  const client = startSayClient(bridge.path, 'send_sticker');
+  try {
+    await client.init();
+    const unknown = await client.call('qq_send_ai_voice', {
+      group_id: 111, text: '语音未知', idem_key: 'voice-unknown',
+    });
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.text, /未知/);
+    assert.equal(bridge.getState('qq-bridge:speech:group:111'), null);
+
+    const count = onebot.calls.length;
+    const again = await client.call('qq_send_ai_voice', {
+      group_id: 111, text: '语音未知', idem_key: 'voice-unknown',
+    });
+    assert.match(again.text, /未知/);
+    assert.equal(onebot.calls.length, count, 'UNKNOWN 之后不得自动重发');
+  } finally { client.kill(); bridge.db.close(); }
 });
 
 onebot.server.close();

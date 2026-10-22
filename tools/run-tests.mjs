@@ -18,7 +18,9 @@ const suites = [
   'reply-recovery',
   'events',
   'voice-transcription',
+  'voice-intent',
   'history-context',
+  'history-timeout',
   'context-time',
   'poke-wake',
   'mcp',
@@ -36,12 +38,15 @@ const suites = [
   'debug',
   'attention',
   'input-floor',
+  'overlap-shadow',
   'timeline',
   'tool-scope',
   'workspace',
-  'task-progress',
   'task-routing',
   'delegated-work',
+  'aux-health',
+  'json-output',
+  'recovery-guard',
 ];
 const requested = process.argv.slice(2);
 if (requested.length) {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 把账号收藏表情导出成分页总览图，落到 cache 目录。
  * 供人工/子代理阅读后编写文字目录。
  *
@@ -8,8 +8,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
 
-const BASE = process.env.ONEBOT_HTTP || 'http://127.0.0.1:3000';
-const TOKEN = process.env.ONEBOT_TOKEN || 'DRtPJdK4YoKfc4W3EoE5cdFfOzL1ZtXSKhLBJ6aN';
+const BASE = process.env.ONEBOT_HTTP || 'http://127.0.0.1:16000';
+/**
+ * 只从环境变量读 token，**不要**再写死默认值。
+ *
+ * 这个文件在公开仓库里：写死的 token 等于把 SnowLuma 的 OneBot 接口直接公开，
+ * 谁拿到都能以机器人身份发消息。需要运行时先设环境变量：
+ *   PowerShell: $env:ONEBOT_TOKEN='...'; node tools/make-sheets.mjs
+ */
+const TOKEN = process.env.ONEBOT_TOKEN ?? '';
+if (!TOKEN) {
+  throw new Error('缺少 ONEBOT_TOKEN 环境变量（需与 SnowLuma HTTP server 的 accessToken 一致）');
+}
 const OUT = path.join(process.cwd(), 'cache');
 
 const COLS = 8;

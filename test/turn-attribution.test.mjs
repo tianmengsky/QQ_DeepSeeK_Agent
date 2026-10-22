@@ -324,6 +324,10 @@ await test('queued prompt waits past an existing turn and an earlier queued prom
   assert.equal(out.reply, '我的最终结果');
   assert.equal(stats.lastTurn.myTurn, 9);
   assert.equal(stats.lastTurn.sawOtherTurnEnd, 2);
+  // 首字延迟与总时长必须落盘：用来区分"等首字"和"写得慢"（供应商 vs 提示词）。
+  assert.equal(typeof stats.lastTurn.ttftMs, 'number');
+  assert.ok(stats.lastTurn.totalMs >= stats.lastTurn.ttftMs);
+  assert.equal(stats.lastLatency.ttftMs, stats.lastTurn.ttftMs);
 });
 
 await test('queued prompt blocked before user/message still reports its own blocked turn', async () => {

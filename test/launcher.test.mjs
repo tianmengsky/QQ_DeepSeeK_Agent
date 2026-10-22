@@ -12,6 +12,6 @@ if (process.platform !== 'win32') {
     encoding: 'utf8', timeout: 30000,
   });
   assert.equal(result.status, 0, (result.stdout ?? '') + (result.stderr ?? '') + (result.error?.message ?? ''));
-  assert.match(result.stdout, /20 passed, 0 failed/);
+  assert.match(result.stdout, /22 passed, 0 failed/);
   console.log(result.stdout.trim());
 }

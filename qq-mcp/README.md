@@ -25,6 +25,8 @@
 | `qq_say` | **在当前会话里发言**（不用填目标，见下） |
 | `qq_workspace` | 当前会话隔离工作区：列出、读取、写入文件或打包 ZIP |
 | `qq_send_file` | 将当前会话工作区内的文件发送给该群/好友（需 `send_file` 能力） |
+| `qq_read_image` | 列本轮图片目录，或按消息编号和图片序号逐张补读当前/历史/引用图片（需 `read_image`） |
+| `qq_read_forward` | 分页阅读合并转发，按节点编号和图片序号查看其中的图片 |
 | `qq_delete_msg` | 撤回自己发的消息 |
 | `qq_collect_sticker` | 收藏图到本地图库 + 记笔记（描述/情绪/用途） |
 | `qq_list_library_stickers` | 查图库；`candidates=true` 取可直接使用的候选 |
@@ -94,6 +96,10 @@
 | `QQ_MAX_IMAGE_BYTES` | `6291456` | 单张图大小上限（收藏时） |
 | `QQ_STICKER_CATALOG` | `cache/catalog.json` | 收藏表情文字目录（编号 + 描述 + 身份键） |
 | `QQ_ACTIVE_CONVERSATION_TTL_MS` | `300000` | `qq_say` 认的"当前会话"标记多久算过期 |
+| `QQ_MAX_AI_VOICE_CHARS` | `200` | QQ 内置 AI 语音的文本上限，超了直接拒绝 |
+| `QQ_QUOTA_VOICE_PER_HOUR` | `10` | 每个群每小时 AI 语音上限，0=不限 |
+| `QQ_AI_VOICE_CHARACTER` | `lucy-voice-f38` | 固定 AI 语音角色 ID（傲娇少女）；只由部署方改，模型无接口 |
+| `QQ_AI_VOICE_NAME` | `傲娇少女` | 回执里显示的音色名，与上面一起改 |
 
 **建议至少配一个白名单。** 不限制意味着 Agent 能给任何好友/群发消息。
 
@@ -105,8 +111,10 @@
 |---|---|
 | `send_text` | 群/私聊文字（含 `qq_say`） |
 | `send_sticker` | 表情包、收藏表情、mface、图库图 |
+| `send_voice` | QQ 内置 AI 语音（`qq_send_ai_voice`）；只授 `send_sticker` 的旧配置也认 |
 | `read_favorites` | 列举/查看账号收藏表情 |
-| `read_image` | 收藏图到图库、看图库里的图 |
+| `read_image` | `qq_read_image` 补读聊天图片、收藏图到图库、看图库里的图；与 `read_forward` 一起读取合并转发节点中的图片 |
+| `read_forward` | `qq_read_forward` 分页读取本轮消息或其引用消息中的合并转发 |
 | `manage_group` | 群管理（禁言/踢人/改名/改名片/发·删公告）+ 撤回 |
 | `set_profile` | 改**自己**的昵称 / 个性签名（账号级；老配置里的 `manage_group` 也认）|
 | `poke` | 戳一戳 |
@@ -116,6 +124,10 @@
 `read_requests` 和 `handle_request` 是**分开**的：只看是低风险的，同意/拒绝等于让
 陌生人之后能驱动这个 Agent。合成一位的话，"想看一眼申请"就不得不把"能放人进来"
 也一起授出去。
+
+普通聊天图片使用 `qq_read_image`：不带参数列本轮目录，不下载图片；用 `{"message_id":"目录中的消息编号","image_index":1}` 查看该消息的第二张图。`image_count` 是消息中的图片总数，`attached_indices` 是首轮自动附上的图片序号，`read_indices` 是本轮工具已读序号；多图任务应逐张读取所需图片，不能只用最近一张推断整组。范围仅含本轮有界窗口、输入批次与已解析引用消息，不接受任意路径或 URL。目录之外的图需重新发送或引用。来源由宿主绑定，检查能力位、白名单、撤回与有效期；每次返回一张真实 MCP image，最多 4 MiB（桥接配置更小时沿用其值），沿用图片配额。`imagesEnabled: false` 或 `imageMode: never` 时不开放目录；`contextImagesOnRequest: 0` 仅关闭自动补旧图。新增工具后需重新加载 QQ MCP 目录及预设。
+
+合并转发看图沿用 `qq_read_forward`：先传 `forward_id` 分页读取节点 `index` 和 `image_count`，再传同一 `forward_id`、`node_index` 和 `image_index`（从 0 开始）。例如 `{"forward_id":"实际转发编号","node_index":2,"image_index":0}` 查看节点 2 的第一张图；节点有多图时按 `image_count` 继续，返回的 `next_image_index` 给出下一个序号。每次只返回一张 MCP 图片，最多 4 MiB；普通分页只读文字和图片数量，避免自动把整份转发中的图片放入上下文。本轮来源由宿主绑定，模型无需填写 `source_ref`；转发 ID 仍须属于本轮消息或其引用目标。
 
 例如只让它发文字和表情、不许读账号收藏、也不许放人进来：
 
@@ -136,6 +148,24 @@ QQ_CAPABILITIES=send_text,send_sticker,poke,read_requests
 目录里有、收藏里已经没有的那张会直接报错，不会退回按位置猜一张。
 
 目录由 `tools/make-sheets.mjs` 导出总览图、标注后，用 `tools/sync-catalog.mjs` 按编号补上 `key`。
+
+⚠️ `make-sheets.mjs` 的 OneBot token **只从环境变量读**（`ONEBOT_TOKEN`），
+仓库里不再保留任何写死的值。运行前先设：`$env:ONEBOT_TOKEN='...'; node tools/make-sheets.mjs`。
+
+### QQ 内置 AI 语音（`qq_send_ai_voice`）
+
+SnowLuma 的 `send_group_ai_record` 把 QQ 自带的 AI 语音暴露出来：给角色 ID + 文本，
+QQ 服务端合成语音并以**语音气泡**发出。不依赖本地 TTS，也不用 `send_group_msg`。
+
+- **音色固定「傲娇少女」（`lucy-voice-f38`）**：不提供音色列表工具，`qq_send_ai_voice`
+  也没有 `character` 参数 —— 模型既看不到可选音色，也改不了自己的声音。
+  换音色只能由部署方改默认值或设 `QQ_AI_VOICE_CHARACTER` / `QQ_AI_VOICE_NAME`。
+- `qq_send_ai_voice`：`group_id` + `text`（≤ `QQ_MAX_AI_VOICE_CHARS`，默认 200）。
+- 只支持群聊；一次一个语音气泡，不能与文字/图片拼成一条。
+- 与其它发送一样过白名单、能力位、幂等、配额（另有 `QQ_QUOTA_VOICE_PER_HOUR`，默认 10）
+  和发言时机校验；接入端不回 `message_id` 时记 **UNKNOWN** 并禁止自动重发。
+- 成功后往桥接窗口记 `[语音：…]`，并刷新 60 秒唤醒窗口。
+
 
 ### 申请收件箱（`QQ_BRIDGE_DB`）
 

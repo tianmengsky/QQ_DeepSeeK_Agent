@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Store } from '../lib/store.mjs';
 import { rig, message, request, response } from './helpers/bridge.mjs';
 import { DelegatedWork } from '../lib/application/delegated-work.mjs';
-import { injectOwnedAmendment } from '../lib/application/interjections.mjs';
+import { injectOwnedAmendment, injectRunningTurn } from '../lib/application/interjections.mjs';
 import { publishExecutionSource, executionSource, closeExecutionSource, executionToolGuard } from '../lib/agent/execution-scope.mjs';
 import { runTurn } from '../lib/agent/runner.mjs';
 import { taskRegistry } from '../lib/conversation/task-sessions.mjs';
@@ -20,7 +20,7 @@ const route = (action = 'new', taskId = null) => ({ action, taskId, confidence: 
 async function test(name, fn) { try { await fn(); passed++; console.log('  ✓ ' + name); } catch (e) { failed++; console.error('  ✗ ' + name, e.stack); } }
 function make() {
   const store = new Store(path.join(root, rigs.length + '.sqlite3'));
-  const r = rig({ taskRoutingMode: 'enabled', taskProgressEnabled: false, groupTrigger: 'all', replyTimeoutMs: 10000 }, '完成', store);
+  const r = rig({ taskRoutingMode: 'enabled', groupTrigger: 'all', replyTimeoutMs: 10000 }, '完成', store);
   r.store = store; r.state.replyJournal ??= replyJournal(store); rigs.push(r); r.ctx.agents = new Map(); r.runs = [];
   r.ctx.subagents = { getProvider: name => name === 'spawn' ? { name } : null,
     async start(provider, request) {
@@ -190,6 +190,26 @@ try {
     assert.equal(injectOwnedAmendment(r.state.taskScheduler,s.key,[message(3,'改为红色',10,300)],route('amend',s.e.task_id)),false);
     assert.equal(injectOwnedAmendment(r.state.taskScheduler,s.key,[message(4,'新问题')],route('new')),false);
   });
+  await test('forced in-turn injection joins the thinking turn; cancel is still never swallowed', async () => {
+    const r=make(),s=await source(r);
+    // 强制注入不看作者、不看路由裁决，只要求那一轮确实还在跑。
+    assert.equal(injectRunningTurn(r.state.taskScheduler,s.key,[message(2,'结尾改成开放式',10,300)]),true);
+    assert.equal(s.parent.injections.length,1);
+    assert.match(s.parent.injections[0].content[0].text,/结尾改成开放式/);
+    assert.match(s.parent.injections[0].source.rpcId,/^qq-interject:/);
+    assert.equal(r.state.taskRouting.execution(s.e.id).data.inputEvents.length,2);
+    assert.equal(r.state.taskRouting.get(s.e.task_id).version,s.e.data.taskVersion,'注入不涨任务版本、不 supersede');
+    // 取消必须真的置 cancelled：注入给模型只会变成"口头答应不做"。
+    assert.equal(r.state.taskScheduler.forceInject(s.key,[{...message(3,'取消这个任务'),__inputId:'100:3'}]),false);
+    // 进度问句并进这一轮，由 DSH 一起回答；旧的进度旁路已删，桥不再自己生成正文。
+    assert.equal(r.state.taskScheduler.forceInject(s.key,[{...message(4,'写好了吗'),__inputId:'100:4'}]),true);
+    assert.equal(s.parent.injections.length,2);
+    assert.match(s.parent.injections[1].content[0].text,/写好了吗/);
+    assert.equal(r.stats.inTurnInjectionSkipped,1);
+    // 没有在跑的回合时注入会把消息丢掉（inject 不会唤醒空闲的 Agent），必须返回 false。
+    s.parent.status='idle';
+    assert.equal(injectRunningTurn(r.state.taskScheduler,s.key,[message(5,'再来一句',10,300)]),false);
+  });
   await test('a human amendment steers its matching background worker even when parent is idle', async () => {
     const r=make(),s=await source(r),j=await start(r,s);
     s.parent.status='idle';r.state.replyJournal.active.delete(s.turnId);r.state.taskScheduler.active.clear();
@@ -214,7 +234,7 @@ try {
     verdict=decide('query',3);
     await r.state.taskScheduler.admit(s.key,[message(3,'怎么样，可以写吗？')]);
     const query=r.state.taskRouting.execution(r.store.db.prepare('SELECT execution_id FROM bridge_input_routes WHERE id=?').get('100:3').execution_id);
-    assert.equal(query.data.readOnly,true);assert.equal(query.data.referencedTaskId,s.e.task_id);
+    assert.equal(query.data.detached,true);assert.equal(query.data.referencedTaskId,s.e.task_id);
     verdict={...decide('new',4),taskId:null};
     await r.state.taskScheduler.admit(s.key,[message(4,'帮我查一下天气',10,300)]);
     const other=r.state.taskRouting.execution(r.store.db.prepare('SELECT execution_id FROM bridge_input_routes WHERE id=?').get('100:4').execution_id);
@@ -226,7 +246,7 @@ try {
   });
   await test('progress-shaped prefix and natural correction aggregate before semantic injection during a live parent', async () => {
     const r=make(),s=await source(r);let input;
-    Object.assign(r.config,{taskProgressEnabled:true,inputDebounceMs:10,inputShortDebounceMs:40,inputMaxWaitMs:200});
+    Object.assign(r.config,{inputDebounceMs:10,inputShortDebounceMs:40,inputMaxWaitMs:200});
     r.ctx.llm={async *stream(req){input=JSON.parse(req.messages[0].content[0].text);
       yield {type:'text-delta',text:JSON.stringify({action:'amend',taskId:s.e.task_id,confidence:1,evidenceIds:['1','2','3'],reason:'natural-correction'})};}};
     await r.handler(request(message(2,'怎么样了')),response());
@@ -283,7 +303,7 @@ try {
   });
 } finally {
   for(const r of rigs){r.state.disposed=true;r.state.controller.abort();await r.state.delegatedWork.dispose();
-    r.state.inputBatches?.dispose();r.state.taskProgress?.dispose();r.sendQueue.dispose();r.store.db.close();}
+    r.state.inputBatches?.dispose();r.sendQueue.dispose();r.store.db.close();}
   globalThis.fetch=realFetch;fs.rmSync(root,{recursive:true,force:true});
 }
 console.log(`${passed} passed, ${failed} failed`);process.exitCode=failed?1:0;

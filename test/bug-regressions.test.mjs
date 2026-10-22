@@ -902,6 +902,83 @@ await test('text poke replies wake the group even without persistence or an agen
   r.sendQueue.dispose();
 });
 
+/**
+ * 默认模式必须是 wake：戳一下只回戳 + 开清醒窗口，**不惊动 DSH**。
+ *
+ * 旧默认 agent 会把 poke 归一化成合成消息提交一轮推理，于是"戳一下就回一句"。
+ * 这条同时钉住三件事：不提交 prompt、不回固定文案、窗口真的开了。
+ */
+await test('poke defaults to wake: poke back and open the window without a DSH turn', async () => {
+  const r = rig({ selfIds: ['100'], awakeMs: 60000, pokeReplyMinIntervalMs: 0 });
+  await r.post({ ...poke, group_id: 10 });
+  assert.equal(r.prompts.length, 0, '戳一戳不该提交 DSH prompt');
+  assert.equal(r.calls.filter((c) => c.action === 'group_poke').length, 1, '应该回戳一次');
+  assert.equal(r.calls.filter((c) => c.action === 'send_group_msg').length, 0, '不该发固定文案');
+  const entry = r.registry.entry('group:10');
+  assert.equal(entry.awakeUntil - entry.lastSpokeAt, 60000, '醒来窗口要按 awakeMs 打开');
+  assert.ok(entry.awakeUntil > Date.now());
+  assert.equal(r.stats.pokeWoke, 1);
+
+  // 窗口内对方真说话，才进正常回合
+  await r.post(message(1008, '戳你一下怎么了'));
+  assert.equal(r.prompts.length, 1, '窗口内的真实消息仍然要回');
+  assert.equal(r.stats.awakeJoined, 1);
+  r.sendQueue.dispose();
+});
+
+await test('private poke in wake mode only pokes back', async () => {
+  const r = rig({ selfIds: ['100'], pokeReplyMinIntervalMs: 0 });
+  await r.post(poke);
+  assert.equal(r.prompts.length, 0, '私聊戳也不该提交 DSH prompt');
+  assert.equal(r.calls.filter((c) => c.action === 'friend_poke').length, 1);
+  assert.equal(r.calls.filter((c) => c.action === 'send_private_msg').length, 0, '不该发固定文案');
+  r.sendQueue.dispose();
+});
+
+await test('wake mode keeps poke throttle and does not refresh on a throttled poke', async () => {
+  const r = rig({ selfIds: ['100'], awakeMs: 60000, pokeReplyMinIntervalMs: 60000 });
+  await r.post({ ...poke, group_id: 10 });
+  const first = r.registry.entry('group:10').awakeUntil;
+  await r.post({ ...poke, group_id: 10 });
+  assert.equal(r.calls.filter((c) => c.action === 'group_poke').length, 1, '连戳不该再回戳');
+  assert.equal(r.stats.pokeThrottled, 1);
+  assert.equal(r.registry.entry('group:10').awakeUntil, first, '被限流的那次不该刷新窗口');
+  r.sendQueue.dispose();
+});
+
+await test('a failed poke-back still leaves the group awake in wake mode', async () => {
+  const r = rig({ selfIds: ['100'], awakeMs: 60000, pokeReplyMinIntervalMs: 0 });
+  const okFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) =>
+    String(url).endsWith('/group_poke')
+      ? Promise.reject(new Error('poke 接口不支持'))
+      : okFetch(url, init);
+  await r.post({ ...poke, group_id: 10 });
+  const entry = r.registry.entry('group:10');
+  assert.equal(entry.awakeUntil - entry.lastSpokeAt, 60000, '窗口来自被戳，不是回戳成功');
+  assert.equal(r.stats.lastError, undefined, '回戳失败不该报成回合错误');
+  assert.equal(r.prompts.length, 0);
+  r.sendQueue.dispose();
+});
+
+await test('wake-mode poke window is restored from the shared speech state after reload', async () => {
+  const s = db();
+  const settings = { selfIds: ['100'], awakeMs: 60000, pokeReplyMinIntervalMs: 0 };
+  const r = rig(settings, '你好', s);
+  await r.post({ ...poke, group_id: 10 });
+  const speech = JSON.parse(s.getState('qq-bridge:speech:group:10'));
+  assert.ok(speech.at > 0, 'poke 窗口要写共享 speech 时间戳');
+  r.sendQueue.dispose();
+
+  // 同一份库、全新的 registry = 插件重载后的恢复路径
+  const r2 = rig(settings, '你好', s);
+  const entry = r2.registry.entry('group:10');
+  assert.equal(entry.lastSpokeAt, speech.at);
+  assert.equal(entry.awakeUntil - entry.lastSpokeAt, 60000);
+  assert.ok(entry.awakeUntil > Date.now());
+  r2.sendQueue.dispose();
+});
+
 globalThis.fetch = realFetch;
 for (const s of stores) s.db.close();
 fs.rmSync(root, { recursive: true, force: true });

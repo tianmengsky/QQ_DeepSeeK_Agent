@@ -83,6 +83,28 @@ await test('lazy mode leaves an unrequested forward collapsed', async () => {
   } finally { globalThis.fetch = original; }
 });
 
+await test('a fully displayed quoted forward with images exposes lazy image reading without loading pixels', async () => {
+  const r = rig({ forwardMode: 'lazy' });
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/get_forward_msg')) return { ok: true, status: 200,
+      text: async () => JSON.stringify({ status: 'ok', retcode: 0, data: { messages: [
+        { sender: { user_id: 201, nickname: '甲' }, content: [{ type: 'image', data: { file: 'lazy-image' } }] },
+      ] } }) };
+    return mockForwardFetch(original)(url, init);
+  };
+  try {
+    await r.post(quotedForwardEvent(49, '看里面的图片'));
+    const prompt = JSON.stringify(r.prompts);
+    assert.match(prompt, /节点 0/);
+    assert.match(prompt, /图片尚未加载/);
+    assert.match(prompt, /forward_id=forward-quoted/);
+    assert.match(prompt, /node_index/);
+    assert.match(prompt, /image_index/);
+    assert.equal(r.calls.some((call) => call.action === 'get_image'), false);
+  } finally { globalThis.fetch = original; }
+});
+
 await test('lazy mode reads a message that contains only a forward', async () => {
   const r = rig({ forwardMode: 'lazy' });
   const original = globalThis.fetch;

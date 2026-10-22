@@ -79,6 +79,60 @@ try {
     assert.equal(r.prompts.length, 1);
     assert.equal(r.inputs.length, 0, '关着时不做参与决策调用');
   });
+  await test('被 @ 的短问句直接回（方案 A）：不再被决策模型判成沉默', async () => {
+    for (const text of ['猜猜这个是什么', '9月11日忆什么', '9.11 和 9.9 哪个大', '你们谁更厉害']) {
+      const r = make({ reply: false, reason: '看起来像闲聊' }, { replyDecisionEnabled: true });
+      const e = message(1, text);
+      e.message.unshift({ type: 'at', data: { qq: '100' } });
+      await r.post(e);
+      assert.equal(r.prompts.length, 1, `被点名提问应起回合：${text}`);
+      assert.equal(r.inputs.length, 0, `不该再问决策模型：${text}`);
+      assert.equal(r.stats.replyDecisionExplicitAsk, 1, `应计入 explicitAsk：${text}`);
+      assert.equal(r.stats.replyDecisionSilent ?? 0, 0);
+    }
+  });
+  await test('纯打招呼/纯标点不触发方案 A：仍交给决策模型', async () => {
+    for (const text of ['在吗', '在不在？', '？']) {
+      const r = make({ reply: false, reason: '只是喊了她一下' }, { replyDecisionEnabled: true });
+      const e = message(1, text);
+      e.message.unshift({ type: 'at', data: { qq: '100' } });
+      await r.post(e);
+      assert.equal(r.prompts.length, 0, `仍应允许沉默：${text}`);
+      assert.ok(r.inputs.length >= 1, `应问过决策模型：${text}`);
+      assert.equal(r.stats.replyDecisionExplicitAsk ?? 0, 0);
+    }
+  });
+  await test('没被点名（清醒期旁听）的短问句不做方案 A 短路', async () => {
+    const r = make({ reply: false, reason: '别人在聊' }, { replyDecisionEnabled: true });
+    await r.post(message(1, '这是什么'));
+    assert.equal(r.prompts.length, 0);
+    assert.ok(r.inputs.length >= 1, '旁听消息仍走决策模型');
+    assert.equal(r.stats.replyDecisionExplicitAsk ?? 0, 0);
+  });
+  await test('参与决策能看到「回复谁 / 艾特谁」，不再只有文字', async () => {
+    const { decideReply } = await import('../lib/application/reply-decision.mjs');
+    const calls = [];
+    const llm = { async *stream(input) { calls.push(input);
+      yield { type: 'text-delta', text: '{"reply":false,"reason":"在回别人"}' }; } };
+    const r = rig({ replyDecisionEnabled: true, selfIds: ['100'] }, 'x', null, llm);
+    rigs.push(r);
+    const e = message(1, '对的', 10, 300);
+    e.message.unshift({ type: 'at', data: { qq: '200' } });
+    e.message.push({ type: 'reply', data: { id: 'm-9' } });
+    await decideReply(r.ctx, r.config, r.registry.entry('group:10'), [e], { explicit: false });
+    const payload = JSON.parse(calls[0].messages[0].content[0].text);
+    const item = payload['本轮要判断的消息'][0];
+    assert.deepEqual(item['艾特'], ['200'], '要把 @ 对象标成昵称/QQ，方便判断不是叫她');
+    assert.equal(item['回复消息'], 'm-9');
+  });
+  await test('没点名的群消息在提示词里标明"不是叫你"', () => {
+    const r = make({ reply: true }, { replyDecisionEnabled: true });
+    const plain = buildPrompt(message(1, '今天吃啥'), r.config, { includeStatic: false });
+    assert.match(plain, /本条没有点名你/);
+    const e = message(2, '今天吃啥');
+    e.message.unshift({ type: 'at', data: { qq: '100' } });
+    assert.match(buildPrompt(e, r.config, { includeStatic: false }), /对方 @ 了你/);
+  });
   await test('长问句直接回，不问参与决策（削掉那 2.5 秒）', async () => {
     const r = make({ reply: false, reason: '不该被问到' }, { replyDecisionEnabled: true });
     await r.post(message(1, '你觉得这场比赛的胜负关键到底在哪里呢'));

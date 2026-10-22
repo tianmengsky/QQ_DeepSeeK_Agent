@@ -3,8 +3,12 @@
  *
  *   node test/poke-wake.test.mjs
  *
+ * 注意：默认模式已经是 `wake`（桥接回戳 + 开清醒窗口，**不提交 DSH**）。
+ * 本文件保留的是 `pokeReplyMode: 'agent'` 兼容模式的完整覆盖；
+ * wake 模式的回归在 test/bug-regressions.test.mjs。
+ *
  * 为什么单独一个文件：这份测试要跑**真正的 handler**（而不是某个纯函数），
- * 因为被戳唤醒的关键实现是"把 poke 归一化成合成消息事件、落进主流程"，
+ * 因为 agent 模式的关键实现是"把 poke 归一化成合成消息事件、落进主流程"，
  * 那件事发生在 handler 内部。只测 handler 之前的辅助函数是测不到它的。
  *
  * 用假的 webServer 请求/响应 + 假的 sessionController 顶替 DSH，

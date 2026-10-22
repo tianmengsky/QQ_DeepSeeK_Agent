@@ -367,7 +367,7 @@ try {
     assert.ok(!JSON.stringify(r.prompts[0].content).includes('新到的未读'));
   });
   await test('group at, name, follow-up and poke all wake through the shared turn pipeline', async () => {
-    const r = make({ awakeMs: 30000, selfIds: ['100'], pokeAgentSendPoke: false });
+    const r = make({ awakeMs: 30000, selfIds: ['100'], pokeAgentSendPoke: false, pokeReplyMode: 'agent' });
     const at = message(1, '在吗');
     at.message.unshift({ type: 'at', data: { qq: '100' } });
     await r.post(at);
