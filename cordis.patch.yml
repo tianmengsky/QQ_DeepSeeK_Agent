@@ -19,7 +19,7 @@
         # --- the session each QQ conversation runs in -------------------------
         cwd: 'D:\作业\计算机组成原理'
         agentPreset: ''
-        rotateEveryTurns: 20
+        rotateEveryTurns: 30
 
         # --- who may talk to the agent ----------------------------------------
         groups: []

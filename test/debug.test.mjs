@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { rig, message } from './helpers/bridge.mjs';
-import { chunkText, parseDebugCommand, probeOneBot } from '../lib/application/debug.mjs';
+import { chunkText, parseDebugCommand, probeOneBot, __debugTest } from '../lib/application/debug.mjs';
 import { debugSnapshot, renderDebugStatus, redact } from '../lib/application/debug-status.mjs';
 import { heartbeatSnapshot, statusSnapshot } from '../lib/routes/status.mjs';
 let passed = 0;
@@ -39,6 +39,23 @@ const fakeProbe = (data = { online: true, good: true }, failed = false) => {
   };
 };
 try {
+  await test('记事本视图：群本、日记本各自渲染，日记标出可公开条目', () => {
+    const row = (extra = {}) => ({ kind: 'note', text: '凌晨两点最热闹', slot: 'rhythm.close',
+      version: 1, visibility: 'private', deleted: 0,
+      sources: [{ conversation: 'group:10', messageId: '7' }], ...extra });
+    const fake = { agent: { latest: (subject) => subject === 'self'
+      ? [row({ text: '别在别人说忙时追问', slot: 'social.timing', visibility: 'public' })]
+      : subject === 'group:10' ? [row()] : [] } };
+    const diary = __debugTest.notebookView(fake, 'self');
+    assert.match(diary, /【日记】/);
+    assert.match(diary, /可公开/);
+    assert.match(diary, /共 1 条/);
+    const group = __debugTest.notebookView(fake, 'group:10');
+    assert.match(group, /【群 10 记事】/);
+    assert.match(group, /依据 group:10 消息 7/);
+    // 空本不能返回空串，否则调试输出里那一段会凭空消失。
+    assert.match(__debugTest.notebookView(fake, 'group:99'), /（暂无）/);
+  });
   await test('command boundaries preserve ordinary messages and custom prefixes', async () => {
     assert.equal(parseDebugCommand('#debugging status'), null);
     assert.equal(parseDebugCommand('#debug-status'), null);

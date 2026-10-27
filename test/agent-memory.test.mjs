@@ -42,6 +42,23 @@ try {
     assert.match(reopened.read('200'), /明确记忆.*十月到十二月/);
     assert.equal(r.call({ action: 'read' }).records[0].version, 1);
   });
+  await test('read 返回条数与注入预算，接近上限时给清理提示', () => {
+    const r = rig();
+    const text = '在实习'.repeat(60); // 180 字
+    for (let i = 0; i < 3; i++)
+      r.call({ action: 'upsert', scope: 'group', slot: 'rhythm.t' + i, kind: 'note', text, version: 0 });
+    const read = r.call({ action: 'read', scope: 'group' });
+    assert.equal(read.subject, 'group:10');
+    assert.equal(read.count, 3);
+    assert.equal(read.chars, 540);
+    assert.equal(read.budget, 600);
+    assert.match(read.hint, /已占 540\/600 字/);
+    // 没接近预算时不该有 hint，否则提示会退化成噪音。
+    r.call({ action: 'upsert', scope: 'self', slot: 'social.short', kind: 'note', text: '短', version: 0 });
+    const diary = r.call({ action: 'read', scope: 'self' });
+    assert.equal(diary.hint, undefined);
+    assert.equal(diary.budget, 400);
+  });
   await test('replay is idempotent and stale concurrent revision cannot overwrite', () => {
     const r = rig(); r.write(); assert.equal(r.write().replay, true);
     r.write({ version: 1, text: '实习期已确认' });
@@ -115,7 +132,7 @@ try {
   });
   await test('prompt gives primary agent responsibility and demands success receipt before confirmation', () => {
     const p = buildPrompt(message(1), config({ memoryEnabled: true }), { includeStatic: true });
-    assert.match(p, /qq_memory/); assert.match(p, /SAVED 回执才支持/); assert.match(p, /impression/);
+    assert.match(p, /qq_memory/); assert.match(p, /只有 SAVED 回执才能说/); assert.match(p, /impression/);
     assert.doesNotMatch(p, /正常聊天即可/);
   });
   await test('memory directory follows stateDir when left empty', () => {

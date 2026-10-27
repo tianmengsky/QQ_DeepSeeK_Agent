@@ -42,7 +42,6 @@ try {
     assert.equal(content.imageCatalog[0].images.length, 6);
     assert.deepEqual(content.imageCatalog[0].attached, [0, 1, 2, 3]);
     assert.match(content[0].text, /qq_read_image/);
-    assert.match(content[0].text, /"image_count":6/);
     assert.ok(content.some((p) => p.type === 'text' && p.text === '【消息 multi，图片 2】'));
     assert.equal(r.calls.filter((c) => c.action === 'get_image').length, 4);
     assert.equal(content[0].text.includes(root), false);

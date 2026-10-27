@@ -471,6 +471,13 @@ try {
     const firstStarted = new Promise((resolve) => { started = resolve; });
     const firstGate = new Promise((resolve) => { release = resolve; });
     globalThis.fetch = async (_url, init) => {
+      /**
+       * 自传刷新（get_login_info / get_group_list / get_friend_list）也走这个 HTTP 口，
+       * 但它不是发送：既不该计入 sent，也不该触发 firstStarted。
+       * 这条判断是 2026-10-22 加自传层之后必须的 —— 否则第一次"发送"其实是取昵称。
+       */
+      if (!/send_(?:group|private)_msg$/.test(String(_url)))
+        return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'ok', retcode: 0, data: {} }) };
       sent.push(JSON.parse(init.body).message);
       if (sent.length === 1) { started(); await firstGate; }
       return { ok: true, status: 200, text: async () => JSON.stringify({

@@ -202,7 +202,7 @@ try {
   });
 
   await test('memory extraction failure is attributed and backs off instead of retrying every 30s', async () => {
-    const r = rig({ memoryEnabled: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, silent());
+    const r = rig({ memoryEnabled: true, memoryAutoExtract: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, silent());
     rigs.push(r);
     const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, 'backoff-' + counter++) });
     const extractor = new MemoryExtractor(r.ctx, r.config, memory, r.stats);
@@ -224,7 +224,7 @@ try {
   });
 
   await test('memory ladder advances per conversation and does not drop the batch early', async () => {
-    const r = rig({ memoryEnabled: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, silent());
+    const r = rig({ memoryEnabled: true, memoryAutoExtract: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, silent());
     rigs.push(r);
     const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, 'ladder-' + counter++) });
     const extractor = new MemoryExtractor(r.ctx, r.config, memory, r.stats);
@@ -245,7 +245,7 @@ try {
   });
 
   await test('memory batch is abandoned after the failure cap and the counters say so', async () => {
-    const r = rig({ memoryEnabled: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, silent());
+    const r = rig({ memoryEnabled: true, memoryAutoExtract: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, silent());
     rigs.push(r);
     const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, 'drop-' + counter++) });
     const extractor = new MemoryExtractor(r.ctx, r.config, memory, r.stats);
@@ -269,7 +269,7 @@ try {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-aux-memstore-'));
     const store = new Store(path.join(temp, 'mem.sqlite3'));
     try {
-      const r = rig({ memoryEnabled: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0, persistenceEnabled: true }, '[SKIP]', store, silent());
+      const r = rig({ memoryEnabled: true, memoryAutoExtract: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0, persistenceEnabled: true }, '[SKIP]', store, silent());
       rigs.push(r);
       const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, 'persist-' + counter++) });
       const extractor = new MemoryExtractor(r.ctx, r.config, memory, r.stats, store);
@@ -292,7 +292,7 @@ try {
       if (!llm.ok) return;
       yield { type: 'text-delta', text: JSON.stringify({ memories: [] }) };
     } };
-    const r = rig({ memoryEnabled: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, llm);
+    const r = rig({ memoryEnabled: true, memoryAutoExtract: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0 }, '[SKIP]', null, llm);
     rigs.push(r);
     const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, 'clear-' + counter++) });
     const extractor = new MemoryExtractor(r.ctx, r.config, memory, r.stats);

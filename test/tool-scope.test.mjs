@@ -45,10 +45,11 @@ test('group management and self-profile tools are inside the QQ scope', () => {
   for (const name of ['qq_manage_group', 'qq_set_profile', 'qq_request_kick', 'qq_delete_msg'])
     assert.ok(QQ_SESSION_TOOLS.includes(name), name + ' 应该在 QQ 会话可见范围内');
 });
-test('bridge-owned delegation is visible, while unrestricted native delegation/control stays filtered', () => {
-  const names=['qq_delegate','qq_delegate_status','qq_delegate_control','qq_job_progress'];
-  const f=registryFixture([...names,'subagent','fork','send_message','interrupt_agent']);
-  assert.deepEqual(f.visible(),names);
+test('native subagent tools stay visible; unrelated global tools stay filtered', () => {
+  // 2026-10-23：qq_delegate 下线，委派改走 DSH 原生 subagent 这一组。
+  const names = ['subagent', 'subagent_fork', 'list_agents', 'send_message', 'interrupt_agent'];
+  const f = registryFixture([...names, 'run_code', 'qq_delegate_status', 'some_other_tool']);
+  assert.deepEqual(f.visible(), names);
 });
 test('document tools stay write-only, so no tool can open an arbitrary path', () => {
   assert.deepEqual(DOCUMENT_TOOLS, ['create_word_document', 'create_pdf']);

@@ -20,6 +20,9 @@ node_modules/
 # 缓存与临时产物
 /qq-mcp/cache/
 /.codex-debug-stage/
+/.tmp/
+# 工具自己的内部笔记（含真实聊天摘录，与 HANDOFF 同级，不随公开仓库发布）
+/.workbuddy/
 t-out.txt
 t-err.txt
 test-out.txt

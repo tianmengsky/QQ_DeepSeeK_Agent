@@ -46,6 +46,31 @@ const transient = rig(() => {
 await transient.run(); await transient.run();
 assert.equal(calls, 2, 'temporary errors must not permanently disable recovery'); passed++;
 
+// 2026-10-27：malformed 常常是瞬时的。带探针的守卫自检通过后必须自己接着跑，
+// 否则"暂停"= 群里此后再无一条正文，而状态页看上去一切正常。
+calls = 0;
+const healable = (() => {
+  const fired = [];
+  const run = createRecoveryGuard({
+    state: {}, stats: fired.stats = {}, logger: { warn: m => fired.push(m) },
+    label: '投递恢复', retryMs: 0, probe: () => true,
+  }, () => { calls++; throw Object.assign(new Error('database disk image is malformed'), { errcode: 11 }); });
+  return { run, stats: fired.stats, warnings: fired };
+})();
+await healable.run();
+assert.equal(healable.stats.recovery['投递恢复'].paused, true, 'paused after damage');
+await healable.run();
+assert.equal(calls, 2, 'probe said the db is fine again, so recovery resumes');
+assert.equal(healable.stats.recovery['投递恢复'].paused, true, 'the retry failed again, so it pauses again');
+assert.equal(healable.stats.recovery['投递恢复'].resumed, 1); passed++;
+
+calls = 0;
+const stillBroken = createRecoveryGuard({
+  state: {}, stats: {}, logger: { warn() {} }, retryMs: 0, probe: () => false,
+}, () => { calls++; throw Object.assign(new Error('file is not a database'), { errcode: 26 }); });
+await stillBroken(); await stillBroken(); await stillBroken();
+assert.equal(calls, 1, 'a db that still fails the probe stays paused'); passed++;
+
 const rejected = rig(async () => { throw new Error('async recovery failed'); });
 await rejected.run();
 assert.match(rejected.stats.lastError, /async recovery failed/); passed++;

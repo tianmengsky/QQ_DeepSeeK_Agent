@@ -128,7 +128,7 @@ await test('quoted forward is expanded like a quoted image', async () => {
     await r.post(quotedForwardEvent(36));
     assert.equal(forwardCalls.count, 1);
     assert.match(JSON.stringify(r.prompts), /第一条/);
-    assert.match(JSON.stringify(r.prompts), /引用 丙/);
+    assert.match(JSON.stringify(r.prompts), /引用：丙/);
   } finally { globalThis.fetch = original; }
 });
 

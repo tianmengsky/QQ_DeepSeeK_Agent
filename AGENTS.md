@@ -27,5 +27,11 @@
 - 本目录是 Git 仓库，远端为公开仓库 tianmengsky/QQ_DeepSeeK_Agent。`HANDOFF.md`、`docs/reports/`、`memory/`、`data/` 已在 .gitignore 中，禁止改为跟踪：前两类是内部记录，后两类含群友隐私与真实聊天记录。
 - 提交前避免覆盖用户配置或打印 profile/preset 中的密钥。
 - 修改中文源码和配置使用 apply_patch，避免 PowerShell Set-Content 编码问题。
+- 测试只钉行为（归属、顺序、去重、投递、回执、窗口/记忆预算），不钉提示词措辞：改版式或换一句文案不该让测试变红。`test/prompt-system.test.mjs` 已按此原则删除，纯文案断言不再新增。
 - DSH HMR 监视源码目录，测试通过 node tools/run-tests.mjs 在系统临时副本运行。
+- 分三档，按改动范围选，不必每次跑全量：
+  - 日常改完一个模块：`node tools/run-tests.mjs <套件名>`（几秒）或 `--quick`（核心九套，349 项，6 秒）
+  - 提交前：`--fast`（跳过 mcp/poke-wake，817 项，14 秒）
+  - 动了 mcp、poke-wake 或桥接核心：全量（915 项，66 秒，4 路并行）
+- `mcp` 单套就占全量一半以上：它 spawn 43 次真实的 qq-mcp 子进程（单次冷启动约 1.8 秒），测的是进程边界，不要为了快把它 mock 掉。
 - 改动完成后核对在线 build、replyPolicy、托管/心跳状态、发送队列及 lastError，并更新 README/HANDOFF。

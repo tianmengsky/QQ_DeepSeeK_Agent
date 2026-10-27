@@ -341,7 +341,7 @@ await test('窗口紧贴在「现在这条消息」上方', async () => {
     .map((p) => p.text)
     .join('\n');
   const iWindow = text.indexOf('【最近聊了什么');
-  const iCurrent = text.indexOf('—— 现在这条消息 ——');
+  const iCurrent = text.indexOf('════════ 现在这条消息');
   assert.ok(iWindow >= 0, '该有窗口段');
   assert.ok(iCurrent > iWindow, '窗口必须在「现在这条消息」之前');
   // 中间不该夹着大段别的说明

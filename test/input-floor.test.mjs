@@ -112,17 +112,17 @@ try {
     await post(r, direct('first', '等我把要求发来')); await settle(r);
     await post(r, direct('other', '这是另一件事', 300)); await settle(r);
     const section = r.prompts[1].content[0].text;
-    assert.ok(!section.includes('[消息 first，'));
+    assert.ok(!section.includes('消息 first'));
     assert.equal(r.state.inputBatches.entry('group:10').waiting[0].message_id, 'first');
     await post(r, message('fragment', '要白色的')); await settle(r);
-    assert.match(r.prompts[2].content[0].text, /\[消息 first，/);
+    assert.match(r.prompts[2].content[0].text, /消息 first/);
   });
   await test('same-author independent question does not revive a WAIT batch', async () => {
     const r = make({}, '[WAIT]'), key = 'group:10';
     await post(r, direct('wait', '等我发条件')); await settle(r);
     await post(r, direct('new', '这是另一件事')); await settle(r);
     assert.equal(r.prompts.length, 2);
-    assert.ok(!r.prompts[1].content[0].text.includes('[消息 wait，'));
+    assert.ok(!r.prompts[1].content[0].text.includes('消息 wait'));
     assert.equal(r.state.inputBatches.entry(key).waiting[0].message_id, 'wait');
   });
   await test('requester cancellation remains effective after the 100-row floor window rolls over', async () => {

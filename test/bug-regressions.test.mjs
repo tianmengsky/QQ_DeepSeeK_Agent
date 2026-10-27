@@ -617,8 +617,8 @@ await test('prompt ends with the current message even with poke, reactions and t
   );
   assert.ok(text.endsWith('CURRENT-BODY'));
   assert.ok(text.indexOf('MEMORY') < text.indexOf('WINDOW'));
-  assert.ok(text.indexOf('WINDOW') < text.indexOf('—— 现在这条消息 ——'));
-  assert.ok(text.includes('【记忆写入提醒】'));
+  assert.ok(text.indexOf('WINDOW') < text.indexOf('════════ 现在这条消息'));
+  assert.ok(text.includes('【本轮记事】'));
 });
 await test('archive-only memory remains known and long memory retains the latest fact', async () => {
   const ev = message(1, 'deepseek 你好');

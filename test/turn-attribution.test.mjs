@@ -68,6 +68,22 @@ const assistant = (seq, turn, text) => ({
     data: { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text }] } },
   },
 });
+/** 一条 assistant 消息里带多个 text 段（上游重复吐正文时的真实形状）。 */
+const assistantParts = (seq, turn, texts) => ({
+  type: 'event',
+  event: {
+    seq,
+    type: 'assistant/message',
+    data: {
+      turn,
+      step: 1,
+      message: {
+        role: 'assistant',
+        content: texts.map((text) => ({ type: 'text', text })),
+      },
+    },
+  },
+});
 const toolCall = (seq, turn, name, args) => ({
   type: 'event',
   event: { seq, type: 'tool/call', data: { turn, step: 1, callId: 'c1', name, arguments: args } },
@@ -100,7 +116,6 @@ function rigWith(frames) {
 }
 
 console.log('\nturn 归因：只认属于我的那个 turn/end');
-
 await test('我的 turn 结束后还有别人一轮 → 只取我的回复，不把别人的发出去', async () => {
   const { ctx, cfg, registry, stats } = rigWith([
     snapshot(0),
@@ -273,6 +288,49 @@ await test('助手文本抽取只看 text 段，忽略 reasoning', () => {
   );
 });
 
+console.log('\n上游重复吐同一段正文时，只取一份');
+
+await test('两个一模一样的文本段 → 只留一份', () => {
+  assert.equal(
+    textOfAssistantEvent({
+      message: { content: [{ type: 'text', text: '哈？这拼写…是故意的吧' },
+        { type: 'text', text: '哈？这拼写…是故意的吧' }] },
+    }),
+    '哈？这拼写…是故意的吧',
+  );
+});
+
+await test('重复段不会把表情标记粘进下一段（事故文本原样重放）', () => {
+  const once = '哈？这拼写…是故意的吧\n\n行行行，Suck 也是我，反正我一条都不少干\n\n[表情:38]';
+  assert.equal(
+    textOfAssistantEvent({ message: { content: [{ type: 'text', text: once }, { type: 'text', text: once }] } }),
+    once,
+  );
+});
+
+await test('内容不同的多个文本段仍然按顺序拼接', () => {
+  assert.equal(
+    textOfAssistantEvent({
+      message: { content: [{ type: 'text', text: '第一段' }, { type: 'text', text: '第二段' }] },
+    }),
+    '第一段第二段',
+  );
+});
+
+await test('整轮跑下来回复不翻倍，并把重复段记进读数', async () => {
+  const body = '哈？这拼写…是故意的吧\n\n[表情:38]';
+  const { ctx, cfg, registry, stats } = rigWith([
+    snapshot(0),
+    turnStart(1, 1),
+    assistantParts(2, 1, [body, body]),
+    turnEnd(3, 1),
+  ]);
+  const out = await runTurn(ctx, cfg, registry, 'group:1', [{ type: 'text', text: 'x' }], stats, {});
+  assert.equal(out.reply, body, '正文只能有一份');
+  assert.equal(stats.dupTextParts, 1, '丢弃的重复段要有读数');
+  assert.equal(stats.lastTurn.dupTextParts, 1, 'lastTurn 里也要能查到');
+});
+
 console.log('\nqq_say: 提示词必须告诉它"当前会话"');
 
 await test('提示词里写明了当前会话，且教了 qq_say 怎么用', async () => {
@@ -293,7 +351,7 @@ await test('提示词里写明了当前会话，且教了 qq_say 怎么用', asy
     { includeStatic: true, includeWindow: false, shape: null },
   );
   const text = Array.isArray(prompt) ? prompt.map((p) => p.text ?? '').join('') : String(prompt);
-  assert.match(text, /【当前会话】group:100000001/, '不写这一行，qq_say 的 conversation 就只能靠猜');
+  assert.match(text, /当前会话 group:100000001/, '不写这一行，qq_say 的 conversation 就只能靠猜');
   assert.match(text, /qq_say/, '得告诉它有这个工具');
   assert.match(text, /最终回复交付新的结果/, '即时进度之后保留新的最终结果');
 });
@@ -494,6 +552,119 @@ await test('两种嵌套 callId 均可用；结构化失败/未知/dry-run/重�
     assert.equal(out.spokeByTool, ['replayed', 'SUCCEEDED'].includes(status));
     assert.equal(wakes, status === 'SUCCEEDED' ? 1 : 0);
   }
+});
+
+await test('桥接等超时但没看到本轮 turn/end → 明确标记"回合还在跑"，不当作收工', async () => {
+  // 线上事故：六博棋那轮 model 想了两分多钟，桥接 replyTimeoutMs=180s 先到。
+  // 若把它当成"回合结束"，execute-turn 的 finally 会撤掉 turn-session，
+  // 之后模型每一次 qq_send_file 都报"工作区与文件工具只能在本轮 QQ 会话内使用"。
+  const ctx = { logger: { info() {}, warn() {}, error() {} }, get: () => undefined };
+  ctx.sessionController = {
+    async create() { return { sessionId: 's1' }; },
+    async prompt() {},
+    follow: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield snapshot(0);
+        yield turnStart(1, 1);
+        await new Promise(() => {});   // 模型还在思考：流不再吐帧
+      },
+    }),
+  };
+  const cfg = config({ replyTimeoutMs: 60 });
+  const registry = new ConversationRegistry(ctx, cfg, null);
+  // AbortSignal.timeout 的定时器是 unref 的：测试里没有别的句柄，进程会在超时前退出。
+  const alive = setTimeout(() => {}, 1000);
+  try {
+    await assert.rejects(
+      runTurn(ctx, cfg, registry, 'group:1', [{ type: 'text', text: 'x' }], {}, {}),
+      (error) => {
+        assert.equal(error.turnStillRunning, true, '必须告诉调用方"回合还开着"，否则归属会被跟着超时撤掉');
+        return true;
+      },
+    );
+  } finally { clearTimeout(alive); }
+});
+
+await test('回合正常收工（哪怕是被 cancel 结束的 turn/end）不标记"还在跑"', async () => {
+  for (const kind of ['completed', 'canceled', 'aborted']) {
+    const { ctx, cfg, registry, stats } = rigWith([snapshot(0), turnStart(1, 1), assistant(2, 1, '好'), turnEnd(3, 1, kind)]);
+    const out = await runTurn(ctx, cfg, registry, 'group:1', [], stats, {});
+    assert.equal(out.reply, '好');
+    assert.equal(out.turnStillRunning, undefined, '正常收工的回合不该被当成还在跑');
+  }
+});
+
+/**
+ * 输入被并进「正在跑的那个 turn」：没有属于我的 turn/start，但那一轮里
+ * 我提交之后生成的正文就是给我的回复 —— 必须发出去。
+ *
+ * 线上事故（2026-10-27 00:06~00:11）：六博那一轮跑了十几分钟没结束，
+ * 「我的文件呢」「搜索一下姆巴佩」都被并进去，旧实现把这些文本整段丢掉，
+ * 群里一个字都没有，用户在 GUI 里却看得见答案。
+ */
+const spliceInsert = (seq, rpcId) => ({
+  type: 'event',
+  event: {
+    seq, type: 'agent/inbox/spliced',
+    data: { target: 'next-turn', start: 0, removedCount: 0, inserted: [{ source: { rpcId } }] },
+  },
+});
+const spliceRemove = (seq) => ({
+  type: 'event',
+  event: {
+    seq, type: 'agent/inbox/spliced',
+    data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'injected' },
+  },
+});
+const assistantAt = (seq, turn, text, time) => ({
+  type: 'event',
+  event: {
+    seq, time, type: 'assistant/message',
+    data: { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text }] } },
+  },
+});
+
+await test('输入被并进正在跑的 turn → 提交之后生成的正文仍然要投递', async () => {
+  const { ctx, cfg, registry, stats } = rigWith([snapshot(0)]);
+  const frames = { list: [snapshot(0)] };
+  // 帧里的 rpcId 是 runTurn 自己生成的，只能在 onBeforePrompt 里拿到，所以动态铺帧。
+  ctx.sessionController.follow = () => ({
+    async *[Symbol.asyncIterator]() { for (const f of frames.list) yield f; },
+  });
+  const out = await runTurn(ctx, cfg, registry, 'group:1', [{ type: 'text', text: '我的文件呢' }], stats, {
+    onBeforePrompt({ requestId }) {
+      frames.list.push(spliceInsert(1, requestId));   // 我这条进了下一轮的收件箱
+      frames.list.push(spliceRemove(2));              // 随即被"注入"进正在跑的 turn，没开新 turn
+      frames.list.push(turnStart(3, 3));              // 别人的 turn 还在跑
+      frames.list.push(assistant(4, 3, '文件在群里了，就那条 liubo.html'));
+      frames.list.push(turnEnd(5, 3));
+    },
+  });
+  assert.equal(out.steeredIntoRunningTurn, true, '归属上仍然不是我的 turn');
+  assert.equal(out.mergedReply, true, '但那条正文是给我的，必须认领');
+  assert.equal(out.reply, '文件在群里了，就那条 liubo.html');
+  assert.equal(out.turn, 3, '要带出 turn 号，投递端才能做去重');
+  assert.ok(out.requestId, '要带出 requestId，投递端才能做去重');
+});
+
+await test('并入别人的 turn 时，我提交之前就存在的旧文本不许当成我的回复', async () => {
+  const { ctx, cfg, registry, stats } = rigWith([snapshot(0)]);
+  const frames = { list: [snapshot(0)] };
+  ctx.sessionController.follow = () => ({
+    async *[Symbol.asyncIterator]() { for (const f of frames.list) yield f; },
+  });
+  const out = await runTurn(ctx, cfg, registry, 'group:1', [{ type: 'text', text: '我的文件呢' }], stats, {
+    onBeforePrompt({ requestId }) {
+      frames.list.push(spliceInsert(1, requestId));
+      frames.list.push(spliceRemove(2));
+      frames.list.push(turnStart(3, 3));
+      // 十分钟前别人那一轮的正文，时间戳早于我提交的时刻。
+      frames.list.push(assistantAt(4, 3, '别人十分钟前的答案', Date.now() - 10 * 60 * 1000));
+      frames.list.push(turnEnd(5, 3));
+    },
+  });
+  assert.equal(out.mergedReply, false);
+  assert.equal(out.reply, '', '不能把别人那段的尾巴当成我的回复发进群里');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

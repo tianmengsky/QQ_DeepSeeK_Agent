@@ -2023,7 +2023,15 @@ async function handle(name, args = {}) {
     }
 
     case 'qq_get_group_list': {
-      const list = await onebot('get_group_list');
+      /**
+       * 必须带 no_cache。
+       *
+       * 不带的话 get_group_list 会命中接入端缓存：群里把群名改掉之后，
+       * 这个工具**仍然返回旧名**（实测 2026-10-19：好友群改名「杯满之灿幻庄」后
+       * 仍读到「小鲸鱼的白饭食堂」），而 `qq_group_info action=info` 是实时读、能读到新名。
+       * 自传卡片与"按群名找群"都依赖这里，所以这一行不能省。
+       */
+      const list = await onebot('get_group_list', { no_cache: true });
       if (!list?.length) return ok('没有加入任何群。');
       return ok(
         list.map((g) => `${g.group_id}\t${g.group_name}\t${g.member_count ?? '?'}人`).join('\n'),

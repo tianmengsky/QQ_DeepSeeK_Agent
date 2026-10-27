@@ -289,6 +289,46 @@ await test('普通回复仍然是纯文本（不引入多余结构）', async ()
   assert.equal(typeof grp[0].payload.message, 'string', '不该有 reply 段');
 });
 
+console.log('\ndeliver: 上游重复吐正文时，群里只该看到一遍');
+
+/**
+ * 线上事故原样重放（2026-10-24）：一条 assistant 消息里两个内容相同的文本段，
+ * 拼出来的正文是 `A\n\nB\n\n[表情:38]A\n\nB\n\n[表情:38]`。
+ * 当时群里是：A、B、然后第三条「A\nB\n[表情:38]」加一张表情 —— 字面量标记漏了出去。
+ */
+await test('正文重复时只发两份气泡，且不漏出 [表情:N] 字面量', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  const line1 = '哈？这拼写…是故意的吧';
+  const line2 = '行行行，Suck 也是我，反正我一条都不少干';
+  const one = `${line1}\n\n${line2}\n\n[表情:38]`;
+  const stats = {};
+  await bridge.__test.deliverReply(ctx, baseConfig(), {
+    entry: fakeEntry(),
+    stats,
+    key: 'group:999002',
+    reply: `${one}${one}`,
+    shape: null,
+    target: { group_id: 999002 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const texts = calls
+    .filter((c) => c.action === 'send_group_msg' && typeof c.payload.message === 'string')
+    .map((c) => c.payload.message);
+  assert.deepEqual(texts, [line1, line2], '只该有这两条气泡');
+  for (const c of calls) {
+    assert.ok(
+      !JSON.stringify(c.payload).includes('[表情:'),
+      '任何出站消息都不能带表情标记语法：' + JSON.stringify(c.payload).slice(0, 120),
+    );
+  }
+  assert.equal(stats.repeatedReplyCollapsed, 1, '折回一份要有读数');
+});
+
 globalThis.fetch = realFetch;
 
 console.log(`\n${passed} passed, ${failed} failed`);

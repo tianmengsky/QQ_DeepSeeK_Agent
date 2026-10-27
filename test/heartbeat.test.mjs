@@ -59,8 +59,9 @@ try {
     assert.equal(r.prompts.length, 1); assert.equal(r.calls.length, 0);
     assert.equal(r.stats.floorDeclined, 1);
   });
-  await test('default is strictly more than five, and unreachable threshold is rejected', () => {
-    assert.equal(Config({}).heartbeatUnreadThreshold, 6);
+  await test('default threshold is ten and cooldown is ten minutes; invalid values rejected', () => {
+    assert.equal(Config({}).heartbeatUnreadThreshold, 10);
+    assert.equal(Config({}).heartbeatCooldownMs, 600000);
     assert.equal(Config({}).awakeMs, 60000);
     assert.throws(() => assertConfig(Config({ heartbeatBufferSize: 4 })), /heartbeatBufferSize/);
     assert.throws(() => assertConfig(Config({ heartbeatUnreadThreshold: 5.5 })), /正整数/);

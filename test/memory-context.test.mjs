@@ -27,7 +27,7 @@ function setup(candidates = [memo()], settings = {}) {
     runs++;
     yield { type: 'text-delta', text: JSON.stringify({ memories: candidates }) };
   } };
-  const r = rig({ memoryEnabled: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0,
+  const r = rig({ memoryEnabled: true, memoryAutoExtract: true, memoryExtractBatchSize: 40, memoryExtractIntervalMs: 0,
     ...settings }, '[SKIP]', null, llm);
   const memory = new MemoryStore(r.ctx, { ...r.config, memoryDir: path.join(root, String(counter++)) });
   memory.extractor = new MemoryExtractor(r.ctx, r.config, memory, r.stats);
@@ -238,7 +238,7 @@ try {
     }
     assert.deepEqual(entry.window.map((m) => m.messageId), ['2', '3']);
     const text = buildWindowSection(r.config, entry);
-    assert.ok(text.includes('回复消息 2，原发送者'));
+    assert.match(text, /回复 200 的消息 2/);
   });
   await test('current message follows output constraints and output bubbles are a maximum', async () => {
     const text = buildPrompt(message(1, 'CURRENT'), config({ persona: 'PERSONA' }), {
@@ -257,7 +257,7 @@ try {
     assert.ok(first.includes('补充或转折时用空行分隔'));
     assert.equal(later.includes('【群聊轮次与退避】'), false);
     assert.equal(later.includes('补充或转折时用空行分隔'), false);
-    assert.ok(later.includes('【当前会话】group:10'));
+    assert.ok(later.includes('当前会话 group:10'));
   });
   await test('memory is injected on the first Session turn and only when its content changes', async () => {
     const r = setup([], { memoryAutoExtract: false, memoryInjectOnChange: true });
@@ -314,7 +314,7 @@ try {
     commitWindowInjection(entry, planWindowInjection(cfg, entry, [a]));
     const plan = planWindowInjection(cfg, entry, [b, a]);
     assert.deepEqual(plan.messages.map((m) => m.messageId), ['a', 'b']);
-    assert.match(buildWindowSection(cfg, { window: plan.messages }), /原发送者/);
+    assert.match(buildWindowSection(cfg, { window: plan.messages }), /回复 甲 的消息 a/);
   });
   await test('timestamp calibration is ignored, but changed text and new self receipts are injected', async () => {
     const cfg = config(), entry = { turns: 1, windowHashes: {} };

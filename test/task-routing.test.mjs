@@ -89,7 +89,7 @@ try {
       r.state.taskScheduler.pump(); await until(()=>r.prompts.length===1);
       const other = admit(r,2,'34',300); r.state.taskScheduler.pump(); await until(()=>r.prompts.length===2);
       const prompt=r.prompts[1].content[0].text;
-      assert.match(prompt,/写一份docs文档/); assert.match(prompt,/只处理上述消息 ID/);
+      assert.match(prompt,/写一份docs文档/); assert.match(prompt,/只处理这些消息 ID/);
       assert.doesNotMatch(prompt,/其他窗口任务|"authority":|"files":false/);
       assert.match(prompt,new RegExp(other.task_id));
       const scoped=taskRegistry(r.registry,r.state.taskRouting,other.task_id);
@@ -562,6 +562,29 @@ try {
     assert.match(invoke('mcp__qq__qq_send_file', { source_ref: ref, conversation: 'group:11', path: 'a.zip' }), /文件属于当前 QQ 会话工作区/);
     assert.equal(invoke('mcp__qq__qq_send_file', { source_ref: ref, conversation: 'group:10', path: 'a.zip' }), undefined);
   });
+  await test('a subagent session cannot post into the group, send files or touch group settings', async () => {
+    const r = make({ dialogueSessionMode: 'conversation' });
+    const sessionId = await r.registry.ensureSession('group:10');
+    const e = admit(r, 1, '写个东西');
+    const ref = 'ref-subagent-test';
+    publishExecutionSource(r.store, ref, { conversation: 'group:10', taskId: e.task_id,
+      taskVersion: e.data.taskVersion, sessionId, workspaceScope: 'group:10',
+      expiresAt: Date.now() + 600000 });
+    // 子代理：有 parentSession。它继承父回合的来源，但对外动作必须由父代理来做。
+    const child = (name, args) => executionToolGuard(r.store, r.config, { name, arguments: args,
+      agent: { session: { id: sessionId, header: { parentSession: 'session-parent' } } } });
+    assert.match(child('mcp__qq__qq_say', { conversation: 'group:10', text: '我自己发' }), /子代理不能直接发消息/);
+    assert.match(child('mcp__qq__qq_send_group_msg', { group_id: 10, message: 'x' }), /子代理不能直接发消息/);
+    assert.match(child('mcp__qq__qq_send_file', { conversation: 'group:10', path: 'a.zip' }), /子代理不能直接发消息/);
+    assert.match(child('mcp__qq__qq_manage_group', { group_id: 10, action: 'notice_set', content: 'x' }), /子代理不能直接发消息/);
+    // 干活要用的仍放行：工作区写文件、联网查资料、写记忆。
+    assert.equal(child('mcp__qq__qq_workspace', { action: 'write', path: 'a.html', content: 'x' }), undefined);
+    assert.equal(child('web_search', { queries: ['x'] }), undefined);
+    assert.equal(child('qq_memory', { action: 'read', scope: 'self' }), undefined);
+    // 同一个 Session 没有 parentSession 时是普通回合，照旧可以发言。
+    assert.equal(executionToolGuard(r.store, r.config, { name: 'mcp__qq__qq_say',
+      arguments: { conversation: 'group:10', text: '正常回合' }, agent: { session: { id: sessionId } } }), undefined);
+  });
   await test('closing a source clears its Session pointer so later non-task turns are not judged by a stale lease', async () => {
     const r = make({ dialogueSessionMode: 'conversation' });
     const sessionId = await r.registry.ensureSession('group:10');
@@ -585,34 +608,36 @@ try {
     assert.equal(sourceTtlMs({ replyTimeoutMs: 900000 }), 960000);
   });
 
-  await test('twenty-turn dialogue lifecycle survives reload, refreshes persona and never reuses the old Session', async () => {
-    assert.equal(Config({}).rotateEveryTurns,20);
+  await test('fixed-turn dialogue lifecycle survives reload, refreshes persona and never reuses the old Session', async () => {
+    const LIMIT = Config({}).rotateEveryTurns;
+    // 只钉"按配置的轮数轮换"，不钉具体数值：默认值会随上下文预算调整（20→45→30）。
+    assert.ok(LIMIT > 0);
     const r=make({dialogueSessionMode:'conversation',persona:'LIFECYCLE-PERSONA'});
     const first=await r.registry.ensureSession('group:10');
     const privateSession=await r.registry.ensureSession('user:200');
     workspaceAction(workspaceRoot(r.config),'group:10',{action:'write',path:'lifecycle.txt',content:'保留文件'});
-    for(let n=1;n<=21;n++) {
+    for(let n=1;n<=LIMIT+1;n++) {
       const e=admit(r,n,'生命周期消息'+n);r.state.taskScheduler.pump();
       await until(()=>r.state.taskRouting.execution(e.id).state==='model_finished' && r.state.taskScheduler.active.size===0);
       assert.equal(r.prompts.length,n);
-      if(n<=20) assert.equal(r.prompts[n-1].sessionId,first);
+      if(n<=LIMIT) assert.equal(r.prompts[n-1].sessionId,first);
       const entry=r.registry.entry('group:10');
-      assert.equal(entry.turns,n<=20?n:1);
+      assert.equal(entry.turns,n<=LIMIT?n:1);
       if(n===10) {
         entry.contextChars=60001; // Character estimates no longer shorten a fixed lifecycle.
         r.registry.persist('group:10');r.registry.byKey.delete('group:10');
         assert.equal(r.registry.entry('group:10').turns,10);
       }
-      if(n===20) {r.registry.persist('group:10');r.registry.byKey.delete('group:10');}
+      if(n===LIMIT) {r.registry.persist('group:10');r.registry.byKey.delete('group:10');}
     }
-    const next=r.prompts[20].sessionId;assert.notEqual(next,first);
+    const next=r.prompts[LIMIT].sessionId;assert.notEqual(next,first);
     assert.equal(await r.registry.ensureSession('group:10'),next);
     assert.equal(await r.registry.ensureSession('user:200'),privateSession);
-    assert.match(r.prompts[20].content[0].text,/LIFECYCLE-PERSONA/);
-    assert.doesNotMatch(r.prompts[19].content[0].text,/LIFECYCLE-PERSONA/);
+    assert.match(r.prompts[LIMIT].content[0].text,/LIFECYCLE-PERSONA/);
+    assert.doesNotMatch(r.prompts[LIMIT-1].content[0].text,/LIFECYCLE-PERSONA/);
     assert.equal(readWorkspaceFile(workspaceRoot(r.config),'group:10','lifecycle.txt').toString(),'保留文件');
     const restored=new TaskScheduler({...r,config:r.config,store:r.store,sendQueue:r.sendQueue});restored.restore();
-    await pause(10);assert.equal(r.prompts.length,21);
+    await pause(10);assert.equal(r.prompts.length,LIMIT+1);
   });
   await test('cancel is scoped to one task even with the same owner; queued work is stopped', async () => {
     const r=make(), a=admit(r), b=admit(r,2,'第二项程序');
