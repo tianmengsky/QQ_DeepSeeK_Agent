@@ -31,11 +31,27 @@ try {
     assert.equal(shouldFlushMemory(cfg, base), false);
     assert.equal(shouldFlushMemory(cfg, { ...base, turns: 45 }), true);
     assert.equal(shouldFlushMemory(cfg, { ...base, turns: 3, forceRotate: true }), true);
-    assert.equal(shouldFlushMemory(cfg, { ...base, turns: 3, contextChars: 60000 }), true);
     assert.equal(shouldFlushMemory(cfg, { ...base, turns: 45, memoryFlushSession: 's1' }), false);
     assert.equal(shouldFlushMemory({ ...cfg, memoryFlushEnabled: false }, { ...base, turns: 45 }), false);
     assert.equal(shouldFlushMemory({ ...cfg, memoryEnabled: false }, { ...base, turns: 45 }), false);
     assert.equal(shouldFlushMemory(cfg, { turns: 45 }), false);
+  });
+
+  await test('字符预算只在没有固定轮数时才算轮换点', async () => {
+    const cfg = { memoryEnabled: true, rotateEveryTurns: 45, conversationContextMaxChars: 60000 };
+    // 固定生命周期：字符超了也不换会话，所以绝不能在这里收尾（收尾提示会说谎，
+    // 而且会把这一窗口仅有的一次收尾机会用掉）。
+    assert.equal(shouldFlushMemory(cfg, { sessionId: 's1', turns: 12, contextChars: 67071 }), false);
+    // 线上真实形状：第 30 轮才换。
+    const live = { ...cfg, rotateEveryTurns: 30 };
+    assert.equal(shouldFlushMemory(live, { sessionId: 's1', turns: 12, contextChars: 67071 }), false);
+    assert.equal(shouldFlushMemory(live, { sessionId: 's1', turns: 30, contextChars: 67071 }), true);
+    // 关掉轮数（rotateEveryTurns: 0）时，字符预算就是唯一的轮换点。
+    const unlimited = { ...cfg, rotateEveryTurns: 0 };
+    assert.equal(shouldFlushMemory(unlimited, { sessionId: 's1', turns: 12, contextChars: 67071 }), true);
+    // 任务 Session 用 taskContextMaxChars，同样按字符预算换。
+    assert.equal(shouldFlushMemory({ ...cfg, taskContextMaxChars: 10000 },
+      { sessionId: 's1', turns: 12, contextChars: 10001, stableTaskId: 't1' }), true);
   });
 
   await test('解析：只收窗口里出现过的人，坏条目逐条丢弃', async () => {
