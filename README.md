@@ -1,5 +1,16 @@
 # dsh-qq-bridge
 
+2026-10-28 版本号 `v97-dsh-only-replies` → **`v98-brackets-pacing-dedupe`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示的就是它）。用户问「有多久没有更新版本号了，现在还是 v97？是不是该更新了」——查下来确实只有 2026-10-19 初始化那次写过，之后 9 天又落了 11 个提交（10-22 一个、10-27 八个、10-28 两个）一次没动。
+
+这一版装进去的是同一天的四件事，每一件都改到了线上行为，谁在跑旧 build 一眼要能看出来：
+
+① **正文改『』气泡协议**（`PROMPT_REVISION='v90-bracket-bubbles'`，`bubbleProtocol: auto|brackets|off`）：一个『』= 一条消息，框外一律不发；删除 prompt 与桥接两侧的气泡数上限（`maxBubbles` 标 `@deprecated`）。
+② **同轮复述去重**（`dedupeRepeatedBubbles`）：模型把一句答复换个说法重写两遍时只发最后那版；三档判重（完全相同 / 互相包含 ≥4 字 / Dice ≥0.6 且 ≥6 字），阈值标定自线上样本（复述对 0.692/0.958/0.800，不同的话 0.000–0.133）。
+③ **迟到结果不再静默消失**：`output()` 返回命中行数，命中 0 行就 `lateOutput()` 把正文和原因落库并计数 `lateRepliesDropped`；迟发护栏的行龄改从 `alive_at`（最后一次确认回合还活着）算起。
+④ **回合写出正文后不再注入新消息**：`runner` 的 `onReplyText` → `journal.markWroteText` → `interjections#injectRunningTurn` 关闸，新消息排成下一轮，不再把一句答复拖成「攒到群里安静才一次性发」的一长串。
+
+验证：`--fast` **904 项通过**；唯一失败文件是既有的 `lifecycle`（`git stash` 后在干净树上同样失败）。`package.json` 仍是 `0.1.0`（私有包、不发布，没有任何地方读它，所以只动 `stats.build`）。
+
 2026-10-27 后台恢复自愈 + `回复恢复` 读数：用户反馈"群 324089993 的会话出 bug 了"。现象是**模型一直在答、群里一直没声**：`bridge_executions` 11:04 之后照样 `model_finished`，`outbox` 从 11:04:37 起一条新行都没有，`bridge_replies` 里 11:04–11:10 的回复全都停在 `planned`／`attempts=0`／`detail=NULL`。根因是 `stats.lastError` 里那一条 `后台恢复失败: database disk image is malformed`：`recovery-guard` 见到 malformed 就把 `paused` 置真，**此后整个 5 秒恢复节拍直接 return**，于是"队首那条发完之后，后面排队的回复再没有人去发"——而副本上 `PRAGMA integrity_check` / `quick_check` 都是 `ok`，说明那是**瞬时**错误，暂停却永久生效。这也是它难查的原因：出站队列、登录、队列积压全都健康，只有"没人推进"这件看不见的事坏了。
 
 修法两处：
@@ -1050,6 +1061,42 @@ curl.exe -sS -X POST http://127.0.0.1:19387/qq/onebot/control `
 ```
 
 关掉时插件仍然**静默接受**上报并回 204，所以 SnowLuma 不会因为连接失败而报错或重推。
+
+### 面板：一页回答"活着吗 / 哪坏了 / 慢在哪"
+
+```
+http://127.0.0.1:<DSH 的端口>/qq/onebot/panel
+```
+
+端口就是 DSH Web GUI 的端口（每次重启可能变）。面板挂在 DSH 的 webServer 上，跟桥接共存亡：插件没起来就是 404，不用另起服务。
+
+懒得记端口就双击 **`open-panel.bat`**：它扫一遍本机 LISTEN 的端口（先试 DSH 进程名下的），用"页面里有 `id="verdicts"`"当命中条件，找到了就交给默认浏览器。
+
+```
+open-panel.bat                 找端口并打开
+open-panel.bat night           直接开夜间主题（day / night）
+open-panel.bat -Port 10692     跳过探测
+open-panel.bat -Token xxxx     配置里带了 token 时（或设 QQ_PANEL_TOKEN）
+open-panel.bat -NoOpen         只打印地址
+```
+
+逻辑在 `tools/open-panel.ps1`；`.bat` 只做一层 ASCII 转发（cmd 按 OEM 代码页逐字节读 bat，中文会碎，跟 `start-qq-mcp.bat` 同一个理由）。
+
+| 你看到的 | 它怎么来的 |
+|---|---|
+| 顶部判定条 | `lib/panel/verdicts.mjs` 纯函数（零依赖，node 单测和浏览器跑同一份源码），红 > 黄 > 灰排序，每条带「看明细 →」跳到对应 tab |
+| 会话表 | `awake` + `heartbeat.groups` 拼的，默认只列 24h 内有动静或清醒中的，勾「显示全部」看全量 |
+| 任务 / 投递 / 失败面 | `tasks`、`replyDelivery`、`reliability` + `stats.recovery` |
+| 最近一次 | 最后一个回合、prompt 组成、登录、出站队列、辅助层 |
+| 原始 JSON | 折叠在底部，接口原样，没美化 |
+
+只读，唯一的写入口是右上角的托管开关（走 `POST /qq/onebot/control`，`confirm` 一次才发）。`?tab=delivery` / `?tab=failures` 可以直接落到某个 tab。
+
+外观是国风卡通平面（宣纸底、墨线描边、硬投影无模糊，配色取自参考项目：朱砂 `#C44E3A` / 古金 `#D4A84B` / 石绿 `#5B8C5A` / 青金 `#26619C`）。两套主题全在 `:root[data-theme=day]` 与 `:root[data-theme=night]` 的 CSS 变量里：右上角「昼/夜」按钮切换、记在 `localStorage`（`qq-panel-theme`），没选过就跟系统 `prefers-color-scheme`；`?theme=day` / `?theme=night` 可强制某一套（截图、临时看夜间都方便）。首帧由 `<head>` 里的一小段内联脚本决定，不会白闪。
+
+鉴权跟 `/control` 同一套：`token` 配了就必须带 `?token=...`（页面把 token 放进 `Authorization` 头，不写进 HTML）；没配就直接能打开。页面 30 秒轮询一次，标签页隐藏时停。
+
+改 `lib/panel/shell.html` / `lib/panel/app.js` 后**刷新页面**就生效（面板按 mtime 重新拼页，不必重载插件）；`node tools/run-tests.mjs panel` 是它的套件。
 
 登录与启动：`start-qq-mcp.bat` 默认使用 SnowLuma，自动启动接入端并按已登录机器人号选择注入，不强杀 QQ；`restart` 只重置桥接托管。DSH/桥接与 MCP stdio 进程仍由 DSH 管理。普通 QQ 的扫码/账号登录需用户完成。判断就绪必须确认 OneBot 账号正确、`online=true`，并拒绝 `good=false`，端口打开不等于在线。
 
