@@ -52,6 +52,9 @@ try {
     // 任务 Session 用 taskContextMaxChars，同样按字符预算换。
     assert.equal(shouldFlushMemory({ ...cfg, taskContextMaxChars: 10000 },
       { sessionId: 's1', turns: 12, contextChars: 10001, stableTaskId: 't1' }), true);
+    // 归档会话不收模型步骤，收尾只会白等一次超时。
+    const archivedCtx = { get: (n) => (n === 'workspaceRegistry' ? { archivedSessionIds: ['s1'] } : undefined) };
+    assert.equal(shouldFlushMemory(live, { sessionId: 's1', turns: 30, contextChars: 67071 }, archivedCtx), false);
   });
 
   await test('解析：只收窗口里出现过的人，坏条目逐条丢弃', async () => {
