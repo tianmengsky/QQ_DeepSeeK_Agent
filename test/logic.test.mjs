@@ -31,6 +31,9 @@ const {
   isSilence,
   stripImageHallucination,
   stripSyntheticPromptEcho,
+  stripBridgeTags,
+  extractMarkedBubbles,
+  resolveReplyBubbles,
   buildMemorySection,
   MemoryStore,
 } = __test;
@@ -244,6 +247,16 @@ check(
   JSON.stringify(["a\nb"]),
 );
 check("空文本 → 无气泡", splitBubbles("   \n\n  ", 3).length, 0);
+check(
+  "不传上限 = 有几段发几条（不再封顶）",
+  JSON.stringify(splitBubbles("a\n\nb\n\nc\n\nd\n\ne")),
+  JSON.stringify(["a", "b", "c", "d", "e"]),
+);
+check(
+  "传 0 / Infinity 也按不限制处理",
+  splitBubbles("a\n\nb\n\nc", Number.POSITIVE_INFINITY).length,
+  3,
+);
 
 console.log("\n[8] 标记解析");
 check(
@@ -598,7 +611,8 @@ console.log("\n[13] 回复形态模板（抽签）");
     shape: { bubbles: 1, sticker: false },
     stickerAllowed: true,
   });
-  check("签说 1 个气泡", p1.includes("回 1 个气泡"), true);
+  check("不再给气泡数设上限", /最多回 \d+ 个气泡/.test(p1), false);
+  check("仍然说明气泡要用『』框", p1.includes("『"), true);
   check("签说不配图", p1.includes("这条使用纯文字"), true);
   check(
     "签不再塞一份格式说明（格式只在静态块里）",
@@ -610,15 +624,11 @@ console.log("\n[13] 回复形态模板（抽签）");
     shape: { bubbles: 3, sticker: true },
     stickerAllowed: true,
   });
-  check("签说 3 个气泡", p2.includes("回 3 个气泡"), true);
   check("签说配图时给出明确指令", p2.includes("这条要配 1 张表情包"), true);
-  check(
-    "签说配图时说明写哪里",
-    p2.includes("在回复最后单独一行写 [表情:编号]"),
-    true,
-  );
+  check("签说配图时说明写哪里", p2.includes("写在最后一个气泡的『』里"), true);
   check("静态块里给了标记写法", p2.includes("[表情:"), true);
-  check("气泡空行分隔且一句够用就停", p2.includes("空行分隔；一句够用就停"), true);
+  check("气泡想分几条就分几条", p2.includes("想分几条就分几条"), true);
+  check("每轮注入碎句短句的软偏好", p2.includes("偏向碎句、短句、口语"), true);
 
   const p3 = buildPrompt(ev, c, {
     shape: { bubbles: 2, sticker: true },
@@ -654,7 +664,7 @@ console.log("\n[15] 静态内容只注入一次（省 token）");
 
   // 但这些**必须每轮都在**，否则它会失去上下文
   check("后续轮仍带当前消息", later.includes("你好"), true);
-  check("后续轮仍带形态指令", later.includes("回 1 个气泡"), true);
+  check("后续轮仍带正文协议", later.includes("『"), true);
 
   /**
    * 语气锚。
@@ -912,6 +922,39 @@ console.log("\n[20] Word/PDF 工具要落进本会话工作区");
     base,
   );
   check("会话键异常时不注入该段，也不抛错", weird.includes("【工作区绝对路径】"), false);
+}
+
+console.log("\n[气泡协议]");
+
+{
+  check(
+    "『』里的文字才当气泡",
+    JSON.stringify(extractMarkedBubbles("『这啥』『还在上课』")),
+    JSON.stringify({ bubbles: ["这啥", "还在上课"], rest: "", found: true }),
+  );
+  check(
+    "框外的排稿说明被记成残留",
+    extractMarkedBubbles("两气泡：『嗯』配表情 #12").rest.includes("配表情"),
+    true,
+  );
+  check("有 『』 时只发框里的", resolveReplyBubbles("随便说两句『真的』然后闭嘴").text, "真的");
+  check("没有 『』 且没有排稿说明时照旧整段发", resolveReplyBubbles("就是一句普通回复").source, "plain");
+  check(
+    "没有 『』 但有排稿说明时只捞候选句",
+    resolveReplyBubbles('两气泡：\n"？你这比喻……"\n"行吧"\n配 #67。\n\n？你这比喻……\n\n行吧').text,
+    "？你这比喻……\n\n行吧",
+  );
+  check("捞不到候选句就这一轮不发", resolveReplyBubbles("我选 #67，这句看着挺贴。").text, "");
+  check(
+    "strict 模式下没有框一律不发",
+    resolveReplyBubbles("就是一句普通回复", { protocol: "brackets" }).source,
+    "brackets-missing",
+  );
+  check(
+    "代理注解标签不会混进正文",
+    stripBridgeTags('行吧<acp tokens="24" type="text">m00027</acp>，就这样'),
+    "行吧，就这样",
+  );
 }
 
 console.log(`\n全部通过：${pass} 项\n`);

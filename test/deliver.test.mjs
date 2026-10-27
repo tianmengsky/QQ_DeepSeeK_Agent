@@ -329,6 +329,105 @@ await test('正文重复时只发两份气泡，且不漏出 [表情:N] 字面�
   assert.equal(stats.repeatedReplyCollapsed, 1, '折回一份要有读数');
 });
 
+await test('正文协议：只有 『』 里的气泡会进群，框外的排稿说明丢弃', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  const stats = {};
+  const reply = [
+    '两气泡：',
+    '『？你这比喻……』',
+    '『行行行，我憋住，不漏了不漏了』',
+    '配表情 #67 震惊冒冷汗"卧槽，用户怒了"。我选 #67。',
+  ].join('\n');
+  await bridge.__test.deliverReply(ctx, baseConfig(), {
+    entry: fakeEntry(),
+    stats,
+    key: 'group:999004',
+    reply,
+    shape: null,
+    target: { group_id: 999004 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const texts = calls
+    .filter((c) => c.action === 'send_group_msg' && typeof c.payload.message === 'string')
+    .map((c) => c.payload.message);
+  assert.deepEqual(texts, ['？你这比喻……', '行行行，我憋住，不漏了不漏了'], '只该发框里那两条');
+  assert.equal(stats.bubbleProtocolTrimmed, 1, '裁剪要有读数');
+  for (const c of calls) {
+    const raw = JSON.stringify(c.payload);
+    assert.ok(!/两气泡|配表情|我选 #/.test(raw), '排稿说明不能进群：' + raw.slice(0, 160));
+  }
+});
+
+await test('正文协议：兼容路径只捞回她排稿时写过的候选句（复现 21:39 那条泄露）', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  const stats = {};
+  const reply = [
+    '用"憋"字接他的梗挺自然。',
+    '两气泡：',
+    '"？你这比喻……"',
+    '"……行吧，我憋着，尽量不漏"',
+    '配表情 #39 崩溃乱抓头发"爆了爆了" 或 #67 震惊冒冷汗"卧槽，用户怒了"。用 #67 挺贴。或者 #75 装死。',
+    '我选 #67（冒冷汗，被骂的感觉）。',
+    '最终：',
+    '"？这什么破比喻……"',
+    '"行行行，我憋住，不漏了不漏了"',
+    '',
+    '配 #67。',
+    '<acp tokens="24" type="text">m00027</acp>',
+    '？这什么破比喻……',
+    '',
+    '行行行，我憋住，不漏了不漏了',
+  ].join('\n');
+  await bridge.__test.deliverReply(ctx, baseConfig(), {
+    entry: fakeEntry(),
+    stats,
+    key: 'group:999005',
+    reply,
+    shape: null,
+    target: { group_id: 999005 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const texts = calls
+    .filter((c) => c.action === 'send_group_msg' && typeof c.payload.message === 'string')
+    .map((c) => c.payload.message);
+  assert.deepEqual(texts, ['？这什么破比喻……', '行行行，我憋住，不漏了不漏了'], '只该发最终那两句');
+  for (const c of calls) {
+    const raw = JSON.stringify(c.payload);
+    assert.ok(!raw.includes('<acp'), '代理注解标签不能进群：' + raw.slice(0, 160));
+    assert.ok(!/两气泡|配表情|我选 #/.test(raw), '排稿说明不能进群：' + raw.slice(0, 160));
+  }
+});
+
+await test('正文协议 strict：没有 『』 就什么都不发', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  await bridge.__test.deliverReply(ctx, baseConfig({ bubbleProtocol: 'brackets' }), {
+    entry: fakeEntry(),
+    stats: {},
+    key: 'group:999006',
+    reply: '就是一句普通的回复',
+    shape: null,
+    target: { group_id: 999006 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const sends = calls.filter((c) => c.action.startsWith('send_'));
+  assert.equal(sends.length, 0, 'strict 模式下没框过的不该发出去');
+});
+
 globalThis.fetch = realFetch;
 
 console.log(`\n${passed} passed, ${failed} failed`);

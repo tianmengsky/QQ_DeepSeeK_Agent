@@ -379,7 +379,7 @@ POST http://127.0.0.1:19387/qq/onebot          ← 本插件用 webServer.regist
 | 主动插话 | 心跳机制，见下 |
 | 说短话 | 默认一句话 1~10 字，真人打字节奏 |
 | 傲娇语气 | 像会哈气的小猫：短促、带一点刺地接梗；玩笑针对当下的事，遇到认真或被冒犯时收住 |
-| 分几条发 | 当前 desktop profile 的 `replyShapes: []` 关闭抽卡，由模型自行决定，最多 `maxBubbles` 个气泡；气泡之间按字数模拟“正在打字” |
+| 分几条发 | 当前 desktop profile 的 `replyShapes: []` 关闭抽卡，由模型自行决定，**不封顶**（`maxBubbles` 已废弃）；正文里每个气泡用一对 `『』` 框起来，只有框内的字会进群，框外的排稿说明不会发出去；气泡之间按字数模拟“正在打字” |
 | 发表情 | 当前关闭抽卡，由模型选择是否输出 `[表情:编号]`，桥接把它转换为收藏表情发送；标记一律摘干净，绝不作为正文发出去 |
 | @ 别人 | 她自己在正文里写 `[@:QQ号]`（人数上限见 `atMentionMax`），桥接把它变成真的 at 段发出去；**不写就不带**，私聊不 @，`@全体成员` 一律拒绝 |
 | 该沉默就沉默 | 判断不需要接话时只输出 `[SKIP]`，桥接什么都不发 |
@@ -1320,6 +1320,7 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 | `atMentionMax` | `3` | 一个气泡最多 @ 几个人；超出的标记丢弃（防"一句话 @ 一屏人"）|
 | `replyMaxSendAttempts` | `3` | 一条回复**明确发送失败**最多试几次，到上限转 `failed` 终态并放开该会话队列（可在 `status.replyDelivery.failed` 查）；`0` = 无限重试（旧行为）。结果未知（UNKNOWN）不受此限 |
 | `replyRecoveryTimeoutMs` | `20000` | 恢复尝试的单轮超时。一个早已不存在的 DSH 会话重连注定失败，不该占满 `replyTimeoutMs`(180s) |
+| `bubbleProtocol` | `auto` | 正文怎么切成气泡：`auto` = 有 `『』` 就只发框内，没有框且正文像排稿时只捞最后一轮的引号候选句（捞不到就不发）；`brackets` = 严格只发 `『』`，没框一个都不发；`off` = 旧行为（整段按空行切）。气泡数**不封顶**，`maxBubbles` 已废弃 |
 | `replyRecoveryMaxAgeMs` | `900000` | 超过这个时长仍无 outcome 的"进行中"执行视为不可能恢复，收敛成 `failed` 终态（否则它永久占着 `recovering`，让 task 永久 busy 并卡住 `pump`）。用执行自己的 `times.received` 判定，不用 `updated_at` |
 | `replyStaleDeliveryMaxAgeMs` | `600000` | **迟到投递护栏**：`following`／`output` 这类还没有确认结果的行超龄一律不再恢复投递，直接转 `failed`。**行龄从"最后一次确认这一轮还活着"算起**（`bridge_replies.alive_at`，回合归属行还在时由恢复循环续心跳）：回合还在 DSH 里跑就不判死，`turn/end` 取走归属后才开始倒计时，长回合收尾的正文还能被 `runTurn(resume)` 取回来。迟到的回复比不回复更糟——它答的是一个早已结束的话题（实测曾一次性把 14 条 3–4 天前的旧回复发进真实群）。`planned` 不受影响：它已有确认结果，可能正在合法等发送配额窗口 |
 | `taskSweepIntervalMs` | `60000` | `taskScheduler.tick()` 里 `sweep()` 的节流间隔 |

@@ -240,23 +240,23 @@ try {
     const text = buildWindowSection(r.config, entry);
     assert.match(text, /回复 200 的消息 2/);
   });
-  await test('current message follows output constraints and output bubbles are a maximum', async () => {
+  await test('current message marks bubbles with 『』 instead of capping the count', async () => {
     const text = buildPrompt(message(1, 'CURRENT'), config({ persona: 'PERSONA' }), {
       shape: { bubbles: 3, sticker: false }, windowText: 'WINDOW', includeStatic: true,
     });
-    assert.ok(text.includes('最多回 3 个气泡'));
-    assert.ok(text.indexOf('【这条回多少】') > text.indexOf('【要做的事就得真做】'));
-    assert.ok(text.indexOf('【这条回多少】') < text.indexOf('WINDOW'));
+    assert.ok(text.includes('『'), '正文协议要在场：气泡用『』框');
+    assert.ok(!/最多回 \d+ 个气泡/.test(text), '气泡数不该再被桥接限制');
+    assert.ok(text.indexOf('【这条怎么发】') > text.indexOf('【要做的事就得真做】'));
+    assert.ok(text.indexOf('【这条怎么发】') < text.indexOf('WINDOW'));
     assert.ok(text.endsWith('CURRENT'));
   });
-  await test('stable speaking and bubble rules are only in the Session static block', async () => {
+  await test('group-turn rules stay in the Session static block', async () => {
     const event = message(1, '普通消息');
     const first = buildPrompt(event, config(), { includeStatic: true, shape: null });
     const later = buildPrompt(event, config(), { includeStatic: false, shape: null });
     assert.ok(first.includes('【群聊轮次与退避】'));
-    assert.ok(first.includes('补充或转折时用空行分隔'));
+    assert.ok(first.includes('每个气泡用一对『』框起来'));
     assert.equal(later.includes('【群聊轮次与退避】'), false);
-    assert.equal(later.includes('补充或转折时用空行分隔'), false);
     assert.ok(later.includes('当前会话 group:10'));
   });
   await test('memory is injected on the first Session turn and only when its content changes', async () => {
