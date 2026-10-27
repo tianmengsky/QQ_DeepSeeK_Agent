@@ -34,6 +34,7 @@ const {
   stripBridgeTags,
   extractMarkedBubbles,
   resolveReplyBubbles,
+  dedupeRepeatedBubbles,
   buildMemorySection,
   MemoryStore,
 } = __test;
@@ -955,6 +956,20 @@ console.log("\n[气泡协议]");
     stripBridgeTags('行吧<acp tokens="24" type="text">m00027</acp>，就这样'),
     "行吧，就这样",
   );
+  // 2026-10-28 线上：插话后模型把同一组答复重写了一遍，两段被拼在一起发出。
+  check(
+    "同轮复述只留最后那版",
+    JSON.stringify(
+      dedupeRepeatedBubbles(["？说我笨", "刚进来的时候确实笨，谁都不认识", "？说我笨", "刚进来那会儿确实笨，谁都不认识"]).bubbles,
+    ),
+    JSON.stringify(["？说我笨", "刚进来那会儿确实笨，谁都不认识"]),
+  );
+  check(
+    "被短句包含的长句不算重复",
+    JSON.stringify(dedupeRepeatedBubbles(["好", "好家伙，我服了"]).bubbles),
+    JSON.stringify(["好", "好家伙，我服了"]),
+  );
+  check("没有重复时原样返回", dedupeRepeatedBubbles(["一", "二", "三"]).dropped, 0);
 }
 
 console.log(`\n全部通过：${pass} 项\n`);

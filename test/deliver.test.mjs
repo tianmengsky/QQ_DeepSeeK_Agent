@@ -363,6 +363,46 @@ await test('正文协议：只有 『』 里的气泡会进群，框外的排稿
   }
 });
 
+await test('同轮复述的气泡只发最后那版（2026-10-28 线上 23:44 原样）', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  const stats = {};
+  // runner 把两段正文按 \n\n 拼接；后一段是模型换个说法的复述。
+  const reply = [
+    '……哦',
+    '是你给我打分啊',
+    '那我刚给自己打了个 5.5，还顺手扣了半分，这算什么，自评？',
+    '…那你到底给我几分，说嘛，我不还嘴',
+    '……哦，原来是你给我打分啊',
+    '那我刚自己打了个 5.5，还顺手扣半分，算什么，自评？',
+    '…那你给我几分，说嘛，我不还嘴',
+    '至于跟着复读的那个，我记着了哦',
+  ].join('\n\n');
+  await bridge.__test.deliverReply(ctx, baseConfig(), {
+    entry: fakeEntry(),
+    stats,
+    key: 'group:999004',
+    reply,
+    shape: null,
+    target: { group_id: 999004 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const texts = calls
+    .filter((c) => c.action === 'send_group_msg' && typeof c.payload.message === 'string')
+    .map((c) => c.payload.message);
+  assert.deepEqual(
+    texts,
+    ['……哦', '……哦，原来是你给我打分啊', '那我刚自己打了个 5.5，还顺手扣半分，算什么，自评？', '…那你给我几分，说嘛，我不还嘴', '至于跟着复读的那个，我记着了哦'],
+    '同一句话不该发两遍',
+  );
+  assert.equal(stats.repeatedBubblesDeduped, 3, '去重要有读数');
+  assert.equal(new Set(texts).size, texts.length, '发出去的气泡不能有重复');
+});
+
 await test('正文协议：兼容路径只捞回她排稿时写过的候选句（复现 21:39 那条泄露）', async () => {
   const calls = fakeOnebot();
   const ctx = fakeCtx();
