@@ -34,11 +34,17 @@ test('QQ filter keeps chat tools, group-management tools and Word/PDF writers wh
     'mcp__document-editor__read_word_document', 'mcp__document-editor__modify_word_document',
     'mcp__document-editor__edit_pdf', 'mcp__document-editor__verify_document',
     'mcp__document-editor__create_excel_workbook', 'mcp__document-editor__create_pptx_presentation',
-    'list_mcp_resources', 'load_workspace_dependencies'];
-  const f = registryFixture([...chat, ...docs, ...unwanted, 'ask_user_question', 'web_search']);
-  assert.deepEqual(f.visible(), [...chat, ...docs, 'ask_user_question', 'web_search']);
-  assert.equal(f.global().length, chat.length + docs.length + unwanted.length + 2);
+    'list_mcp_resources', 'load_workspace_dependencies', 'ask_user_question'];
+  const f = registryFixture([...chat, ...docs, ...unwanted, 'web_search']);
+  assert.deepEqual(f.visible(), [...chat, ...docs, 'web_search']);
+  assert.equal(f.global().length, chat.length + docs.length + unwanted.length + 1);
   assert.equal(f.restrictions(), 1);
+});
+test('ask_user_question stays filtered: QQ turns have no answerer and the question hangs the whole turn', () => {
+  // 2026-10-27：它被放进过 QQ 作用域，模型在群里问了一句，提问卡只在 DSH 端等人点，
+  // 整轮 1 小时 50 分没结束，后面的群消息全卡在队列里。
+  const f = registryFixture(['ask_user_question', 'web_search', 'qq_memory']);
+  assert.deepEqual(f.visible(), ['web_search', 'qq_memory']);
 });
 test('group management and self-profile tools are inside the QQ scope', () => {
   // 2026-10-12：只给 chat 时她答"改不了啊 我又没权限"，所以 admin 一档也放进来。

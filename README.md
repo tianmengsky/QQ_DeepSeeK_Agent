@@ -552,9 +552,10 @@ QQ 会话跑的是一个完整 DSH Agent，所以它能用 preset 给它的工�
 | `qq_workspace` / `qq_send_file` | 在当前群或私聊独立目录里读写源码、打包 ZIP，再把文件发回当前会话 |
 | `create_word_document` / `create_pdf` | 直接生成 .docx / .pdf（profile 级 document-editor MCP），产物落进本会话工作区再发回 |
 | `tool-web` | 按问题需要搜索网页、抓取资料，按实际来源回答 |
-| `tool-ask-user` | 需要人拍板时问你 |
 
-**砍掉的**：`tool-pwsh` / `tool-bash`（shell）、`workflow`、`plugin_manager`、
+**砍掉的**：`tool-ask-user`（`ask_user_question`，2026-10-27 拔掉：它的提问卡只在
+DSH 桌面/Web 端等人点，QQ 回合没有 answerer，一问整轮就停在「等待你的操作」，
+群里后面的消息全部排队卡死）、`tool-pwsh` / `tool-bash`（shell）、`workflow`、`plugin_manager`、
 `mcp-rars`、`plan-mode`、`compaction`、
 `tool-goal` / `tool-todo` / `tool-skill`，以及 document-editor 里**能打开任意路径**的那批
 （`read_*` / `modify_*` / `edit_pdf` / `verify_document`）和 Excel / PPT 工具。
@@ -929,7 +930,7 @@ agentPreset: qq-hosted
 以及 document-editor 的读 / 改 / 校验工具与 Excel / PPT 工具。
 
 **保留的**：`mcp-qq`（`QQ_TOOLSET=chat,admin`：聊天 + 工作区 + **群管理 / 改自己资料 / 申请**，共 28 个 QQ 工具）、
-`tool-web`、`tool-ask-user`、`tool-result-pruner`，
+`tool-web`、`tool-result-pruner`，
 外加 document-editor 的 `create_word_document` / `create_pdf`（写 Word / PDF；名单在
 [`lib/agent/tool-sets.mjs`](lib/agent/tool-sets.mjs) 的 `DOCUMENT_TOOLS`）。
 
