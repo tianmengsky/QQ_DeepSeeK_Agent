@@ -7,6 +7,7 @@ import { ReplyJournal, replyJournal } from '../lib/delivery/reply-journal.mjs';
 import { runTurn } from '../lib/agent/runner.mjs';
 import { queueReply } from '../lib/delivery/reply-delivery.mjs';
 import { recoverReplies } from '../lib/application/reply-recovery.mjs';
+import { publishTurnSession, clearTurnSession } from '../lib/agent/execution-scope.mjs';
 import { executeTurn } from '../lib/application/execute-turn.mjs';
 import { rig, message, config } from './helpers/bridge.mjs';
 import { ConversationSendQueue } from '../lib/delivery/send-queue.mjs';
@@ -185,6 +186,54 @@ try {
     assert.equal(r.journal.get(m.turnId).state, 'failed');
     assert.equal(r.stats.staleRepliesDropped, 1);
     assert.match(r.journal.get(m.turnId).detail, /replyStaleDeliveryMaxAgeMs/);
+    r.store.db.close();
+  });
+
+  await test('回合还活着时老化行不判死，turn/end 之后仍能取回收尾正文', async () => {
+    const r = setup(), m = meta();
+    r.journal.begin(m.turnId, 'group:10', m);
+    r.store.db.prepare('UPDATE bridge_replies SET created_at=?, updated_at=? WHERE id=?')
+      .run(Date.now() - 4 * 86400000, Date.now() - 4 * 86400000, m.turnId);
+    // 归属行还在 = 回合还活着（pre-step 会一直续租）。19:00 那轮跑到 20:53 就是这个形状。
+    publishTurnSession(r.store, m.sessionId, { conversation: 'group:10', sourceRef: 'src-live',
+      expiresAt: Date.now() + 3600000 });
+    r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+      throw new Error('turn is still running');
+    } });
+    await recover(r);
+    assert.equal(r.journal.get(m.turnId).state, 'following', '回合还活着就不能按迟到判死');
+    assert.equal(r.stats.staleRepliesDropped, undefined);
+    assert.ok(r.journal.get(m.turnId).alive_at > 0, '活着就要续心跳，倒计时从最后一次活着算起');
+    // 回合结束：turn/end 取走归属，倒计时重新开始，收尾的正文还能被取回来。
+    clearTurnSession(r.store, m.sessionId);
+    r.store.db.prepare('UPDATE bridge_replies SET retry_at=0 WHERE id=?').run(m.turnId);
+    r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+      yield { type: 'snapshot', cursor: 4, records: frames(m.requestId), hasMore: false };
+    } });
+    await recover(r);
+    assert.deepEqual(r.calls.map((c) => c.payload.message), ['第一条', '第二条']);
+    assert.equal(r.journal.get(m.turnId).state, 'done');
+    r.store.db.close();
+  });
+
+  await test('结果到手时行已被放弃：正文照样落库并计数，不再静默消失', async () => {
+    const r = setup();
+    r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+      yield { type: 'snapshot', cursor: 0 };
+      // 模拟恢复循环在这一轮还在跑的时候把行判死
+      r.journal.abandon('group:10#m1', '超过 replyStaleDeliveryMaxAgeMs(600000ms) 仍未确认结果');
+      yield event(1, 'assistant/message', { message: { content: [{ type: 'text', text: '被吞掉的正文' }] } });
+      yield event(2, 'turn/end');
+    } });
+    await executeTurn(r.ctx, r.cfg, r.registry, r.state, null, r.stats, r.store,
+      'group:10', message(1), { sendQueue: r.sendQueue });
+    await new Promise((resolve) => setImmediate(resolve));
+    const row = r.journal.get('group:10#m1');
+    assert.equal(row.state, 'failed');
+    assert.equal(row.outcome.reply, '被吞掉的正文');
+    assert.match(row.detail, /结果迟到/);
+    assert.equal(r.stats.lateRepliesDropped, 1);
+    assert.equal(r.calls.length, 0, '已经判死的行不再往群里补发');
     r.store.db.close();
   });
 

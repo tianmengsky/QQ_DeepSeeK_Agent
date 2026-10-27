@@ -1319,7 +1319,7 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 | `replyMaxSendAttempts` | `3` | 一条回复**明确发送失败**最多试几次，到上限转 `failed` 终态并放开该会话队列（可在 `status.replyDelivery.failed` 查）；`0` = 无限重试（旧行为）。结果未知（UNKNOWN）不受此限 |
 | `replyRecoveryTimeoutMs` | `20000` | 恢复尝试的单轮超时。一个早已不存在的 DSH 会话重连注定失败，不该占满 `replyTimeoutMs`(180s) |
 | `replyRecoveryMaxAgeMs` | `900000` | 超过这个时长仍无 outcome 的"进行中"执行视为不可能恢复，收敛成 `failed` 终态（否则它永久占着 `recovering`，让 task 永久 busy 并卡住 `pump`）。用执行自己的 `times.received` 判定，不用 `updated_at` |
-| `replyStaleDeliveryMaxAgeMs` | `600000` | **迟到投递护栏**：`following`／`output` 这类还没有确认结果的行超龄一律不再恢复投递，直接转 `failed`。迟到的回复比不回复更糟——它答的是一个早已结束的话题（实测曾一次性把 14 条 3–4 天前的旧回复发进真实群）。`planned` 不受影响：它已有确认结果，可能正在合法等发送配额窗口 |
+| `replyStaleDeliveryMaxAgeMs` | `600000` | **迟到投递护栏**：`following`／`output` 这类还没有确认结果的行超龄一律不再恢复投递，直接转 `failed`。**行龄从"最后一次确认这一轮还活着"算起**（`bridge_replies.alive_at`，回合归属行还在时由恢复循环续心跳）：回合还在 DSH 里跑就不判死，`turn/end` 取走归属后才开始倒计时，长回合收尾的正文还能被 `runTurn(resume)` 取回来。迟到的回复比不回复更糟——它答的是一个早已结束的话题（实测曾一次性把 14 条 3–4 天前的旧回复发进真实群）。`planned` 不受影响：它已有确认结果，可能正在合法等发送配额窗口 |
 | `taskSweepIntervalMs` | `60000` | `taskScheduler.tick()` 里 `sweep()` 的节流间隔 |
 | `taskReceiptsIntervalMs` | `15000` | `tick()` 里 `refreshReceipts()` 的节流间隔 |
 | `routeSteerableWindowMs` | `600000` | 终态任务在多长时间内仍算"可被 steer"（保住"继续刚做完的那个"）。**它决定要不要为一条消息调路由模型**：实测 375 条非归档任务里只有 1 条可被 steer，所以绝大部分消息本来就不该付这 2.5 秒。设 `0` = 只有真有活干时才调 |
