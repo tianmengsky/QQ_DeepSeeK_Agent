@@ -428,6 +428,47 @@ await test('正文协议 strict：没有 『』 就什么都不发', async () =>
   assert.equal(sends.length, 0, 'strict 模式下没框过的不该发出去');
 });
 
+await test('正文协议：沉默令牌被框进 『』 时仍然什么都不发', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  const stats = {};
+  await bridge.__test.deliverReply(ctx, baseConfig({}), {
+    entry: fakeEntry(),
+    stats,
+    key: 'group:999007',
+    reply: '『[SKIP]』',
+    shape: null,
+    target: { group_id: 999007 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const sends = calls.filter((c) => c.action.startsWith('send_'));
+  assert.equal(sends.length, 0, '[SKIP] 框进引号里也还是沉默，不能把字面量发进群');
+});
+
+await test('正文协议：只有一对空 『』 时什么都不发', async () => {
+  const calls = fakeOnebot();
+  const ctx = fakeCtx();
+  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
+  await bridge.__test.deliverReply(ctx, baseConfig({}), {
+    entry: fakeEntry(),
+    stats: {},
+    key: 'group:999008',
+    reply: '『』',
+    shape: null,
+    target: { group_id: 999008 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state,
+  });
+  const sends = calls.filter((c) => c.action.startsWith('send_'));
+  assert.equal(sends.length, 0, '只写标记不写字等于没话说');
+});
+
 globalThis.fetch = realFetch;
 
 console.log(`\n${passed} passed, ${failed} failed`);

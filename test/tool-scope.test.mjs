@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { apply } from '../lib/agent/tool-scope.mjs';
-import { QQ_SESSION_TOOLS, DOCUMENT_TOOLS } from '../lib/agent/tool-sets.mjs';
+import { QQ_SESSION_TOOLS, DOCUMENT_TOOLS, BILI_READ_TOOLS, BILI_INTERACTION_TOOLS } from '../lib/agent/tool-sets.mjs';
 
 let passed = 0, failed = 0;
 const test = (name, fn) => {
@@ -29,15 +29,17 @@ function registryFixture(names) {
 test('QQ filter keeps chat tools, group-management tools and Word/PDF writers while removing RARS, Office readers and resource schemas', () => {
   const chat = QQ_SESSION_TOOLS.map((name) => 'mcp__qq__' + name);
   const docs = DOCUMENT_TOOLS.map((name) => 'mcp__document-editor__' + name);
+  const bili = [...BILI_READ_TOOLS, ...BILI_INTERACTION_TOOLS];
   const unwanted = ['read', 'read_image', 'write', 'edit', 'glob', 'grep', 'pwsh', 'bash',
     'run_code', 'mcp__qq__qq_collect_sticker', 'mcp__rars__rars_run',
     'mcp__document-editor__read_word_document', 'mcp__document-editor__modify_word_document',
     'mcp__document-editor__edit_pdf', 'mcp__document-editor__verify_document',
     'mcp__document-editor__create_excel_workbook', 'mcp__document-editor__create_pptx_presentation',
-    'list_mcp_resources', 'load_workspace_dependencies', 'ask_user_question'];
-  const f = registryFixture([...chat, ...docs, ...unwanted, 'web_search']);
-  assert.deepEqual(f.visible(), [...chat, ...docs, 'web_search']);
-  assert.equal(f.global().length, chat.length + docs.length + unwanted.length + 1);
+    'list_mcp_resources', 'load_workspace_dependencies', 'ask_user_question',
+    'bili_send_message', 'bili_run', 'bili_config', 'bili_setup'];
+  const f = registryFixture([...chat, ...docs, ...bili, ...unwanted, 'web_search']);
+  assert.deepEqual(f.visible(), [...chat, ...docs, ...bili, 'web_search']);
+  assert.equal(f.global().length, chat.length + docs.length + bili.length + unwanted.length + 1);
   assert.equal(f.restrictions(), 1);
 });
 test('ask_user_question stays filtered: QQ turns have no answerer and the question hangs the whole turn', () => {
