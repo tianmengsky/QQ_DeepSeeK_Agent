@@ -96,6 +96,19 @@ const toolResult = (seq, turn, { isError = false } = {}) => ({
     data: { turn, step: 1, callId: 'c1', message: { role: 'tool', isError, content: [] } },
   },
 });
+/** 注入行（`inTurnInjectionMode: all` / amend 都走这条）。suffix 形如 `all:r1`。 */
+const interject = (seq, turn, suffix) => ({
+  type: 'event',
+  event: {
+    seq,
+    type: 'user/message',
+    data: {
+      turn,
+      message: { role: 'user', content: [{ type: 'text', text: '【本轮还在进行时收到的新消息】…' }] },
+      source: { kind: 'user', rpcId: `qq-interject:${suffix}` },
+    },
+  },
+});
 
 function config(over = {}) {
   return bridge.Config({
@@ -471,6 +484,25 @@ await test('真实 DSH 格式：工具前正文不补发，嵌套 callId 回执�
   assert.equal(stats.lastTurn.sayOk, 1);
   assert.equal(out.intermediateTextParts, 1);
   assert.equal(out.replySelection, 'post-tool-final');
+});
+
+await test('all 注入（又来了新消息）保留已写出的正文，amend 才作废旧草稿', async () => {
+  const draft = '……不敢了不敢了\n\n再漏，我就把草稿自己咽下去';
+  const revised = '概率这东西，只要漏过一次，就成 100% 了';
+  // 2026-10-27 21:13 的真实形状：先答"还敢不敢了"，群里又来一句被注入，最后只发了后一句。
+  for (const [mode, suffix, expected, intermediate] of [
+    ['all', 'all:r1', `${draft}\n\n${revised}`, 0],
+    ['amend', 'amend:r1', revised, 1],
+    ['旧格式没有模式段', 'r1', revised, 1],
+  ]) {
+    const { ctx, cfg, registry, stats } = rigWith([
+      snapshot(0), turnStart(1, 1), assistant(2, 1, draft), interject(3, 1, suffix),
+      assistant(4, 1, revised), turnEnd(5, 1),
+    ]);
+    const out = await runTurn(ctx, cfg, registry, 'group:1', [], stats);
+    assert.equal(out.reply, expected, mode);
+    assert.equal(out.intermediateTextParts, intermediate, mode);
+  }
 });
 
 await test('分开发来的工具边界也清掉过程正文，失败后的最终解释保留', async () => {

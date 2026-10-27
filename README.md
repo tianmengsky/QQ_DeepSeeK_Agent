@@ -9,6 +9,8 @@
 验证：`node tools/run-tests.mjs recovery-guard reply-recovery send-queue deliver` 在系统临时副本中 **45 项通过、0 个测试文件失败**（`recovery-guard` 9 项，新增"探针说库好了就接着跑""探针仍失败就继续暂停"两条）。在线 HMR 重载后：`回复恢复={paused:false,resumed:0}`、`lastError` 空；11:04–11:10 已备好却发不出去的 6 条回复在 11:13:57–11:14:41 一次性发完（同一时段 20 条 outbox 全 SUCCEEDED），群内对话恢复。未发送合成 QQ 消息。
 
 
+2026-10-27 修「答到一半被新消息打断，已写出的正文被当旧草稿复写掉」：用户贴 21:13 那轮截图——先答「……不敢了不敢了／再漏，我就把草稿自己咽下去」，中途来了新消息被注入，最后群里只剩注话后的「概率这东西，只要漏过一次，就成 100% 了」，被问的那句没答。根因是两种注入共用 `qq-interject:<uuid>`，`lib/agent/runner.mjs` 见到就无条件 `discardIntermediate()`；可 `inTurnInjectionMode: all` 的注入指令自己写着「最终答复仍以原请求为准」，属于追加信息而非改需求。① `lib/application/interjections.mjs` 的 `rpcId` 带上模式段 `qq-interject:<all|amend>:<uuid>`；② `lib/agent/runner.mjs` 只有 `amend` 才作废旧草稿，`all` 保留已写出的正文（旧格式无模式段按 `amend` 处理）。验证：`turn-attribution` 32/32、`--fast` 871 项通过。
+
 2026-10-22 每轮提示词版式重整（`v98-prompt-sections`）：用户贴出一轮真实注入后指出"每轮注入的 prompt 太乱了，根本不能好好看清谁在说什么"。旧版把二十多个 `【…】` 平铺成一条流：静态设定、本轮规则、记忆、任务、聊天历史、当前消息全是同一级标题，历史记录又是 `[消息 id，时间 t，谁（qq），引用 x] 内容` 这种元数据在前、人名埋在方括号里的写法；当前消息的正文只是一行裸文本，前后还夹着执行归属的整段 JSON 和单行图片目录 JSON。模型只能靠上下文猜边界，实际症状就是把历史里的发言人当成当前说话人、把上一轮的规则当成本轮授权。
 
 改法只分三层，层级靠位置和符号区分：
