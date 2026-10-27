@@ -828,6 +828,39 @@ try {
       assert.equal(r.stats.humanInterjections, undefined, '这条不是 amend 计数');
     } finally { blocked.resolve(); await until(() => r.state.taskScheduler.active.size === 0); }
   });
+  await test('这一轮已经写出正文后，新消息不再并进来，而是排成下一轮', async () => {
+    const r = make({ inTurnInjectionMode: 'all' }), blocked = gate();
+    r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+      yield { type: 'snapshot', cursor: 0 };
+      await blocked.promise;
+      yield { type: 'event', event: { seq: 1, type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: '本轮回答' }] } } } };
+      yield { type: 'event', event: { seq: 2, type: 'turn/end' } };
+    } });
+    try {
+      const first = admit(r, 1, '写一份战术文档');
+      r.state.taskScheduler.pump(); await until(() => r.prompts.length === 1);
+      const sessionId = r.prompts[0].sessionId;
+      const agent = { id: sessionId, status: 'running', injections: [],
+        inject(m) { this.injections.push(m); } };
+      r.ctx.agents = new Map([[sessionId, agent]]);
+      r.ctx.llm = { stream() { throw new Error('强制注入不该调用语义路由模型'); } };
+      const turnId = r.state.taskRouting.execution(first.id).data.turnId;
+      assert.ok(turnId, '前提：这一轮已经认领到自己的 turn');
+      // 模型写出一句可发正文之后，插话闸该关上。
+      r.state.replyJournal.markWroteText(turnId);
+      assert.equal(r.state.replyJournal.hasWroteText(turnId), true);
+      const later = { ...message(2, '再加一句', 10, 300), __inputId: '100:2', __receivedAt: Date.now() };
+      observeFloor(r.config, r.registry, 'group:10', later);
+      assert.equal(await r.state.taskScheduler.forceInject('group:10', [later]), false);
+      assert.equal(agent.injections.length, 0, '已经写出的答复不该再被新消息拖长');
+      assert.equal(r.stats.inTurnInjectionSkippedAfterText, 1);
+      assert.equal(r.state.taskRouting.execution(first.id).data.inputEvents.length, 1);
+      // 这一轮收尾后闸门自己松开，别把 id 永远留在集合里。
+      blocked.resolve(); await until(() => r.state.taskScheduler.active.size === 0);
+      assert.equal(r.state.replyJournal.hasWroteText(turnId), false);
+    } finally { blocked.resolve(); await until(() => r.state.taskScheduler.active.size === 0); }
+  });
   await test('diagnostics report bounded evidence/latencies and explicit unavailable token data', async () => {
     const r=make();admit(r,1,'秘密正文不能输出');const snapshot=r.state.taskScheduler.snapshot();
     assert.equal(snapshot.latency.routing.samples,1);assert.equal(snapshot.tokenUsage,null);assert.equal(snapshot.cacheUsage,null);

@@ -199,6 +199,21 @@ await test('还没认领到自己的 turn 时，别人先吐的文本一个字�
   assert.equal(out.reply, '认领之后这句才收', '认领前收到的文本必须丢掉，否则会发出不该发的话');
 });
 
+await test('第一次写出正文就报给桥接一次（插话闸据此关闭）', async () => {
+  const { ctx, cfg, registry, stats } = rigWith([
+    snapshot(0),
+    turnStart(1, 6),
+    assistant(2, 6, '第一句'),
+    assistant(3, 6, '第二句'),
+    turnEnd(4, 6, 'completed'),
+  ]);
+  let announced = 0;
+  const out = await runTurn(ctx, cfg, registry, 'group:1', [{ type: 'text', text: 'x' }], stats,
+    { onReplyText: () => { announced++; } });
+  assert.equal(announced, 1, '同一轮只报一次：第二次正文不该再触发关闭闸门');
+  assert.equal(out.reply, '第一句\n\n第二句');
+});
+
 await test('被 steer 进别人正在跑的 turn（带 turn 号）→ 一个字都不取，如实标注', async () => {
   const { ctx, cfg, registry, stats } = rigWith([
     snapshot(0),
