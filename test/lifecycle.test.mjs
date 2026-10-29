@@ -59,7 +59,20 @@ try {
   for (let i = 0; i < 2; i++) {
     const fiber = ctx.plugin(plugin, config);
     await fiber;
-    assert.deepEqual([...routes.keys()].sort(), ['/qq/onebot', '/qq/onebot/control']);
+    assert.deepEqual([...routes.keys()].sort(), [
+      '/qq/onebot',
+      '/qq/onebot/admin/action',
+      '/qq/onebot/admin/actions',
+  '/qq/onebot/admin/conversation',
+      '/qq/onebot/admin/memory',
+      '/qq/onebot/admin/memory/file',
+      '/qq/onebot/admin/settings',
+      '/qq/onebot/admin/settings/reset',
+      '/qq/onebot/admin/text',
+      '/qq/onebot/admin/texts',
+      '/qq/onebot/control',
+      '/qq/onebot/panel',
+    ]);
     await fiber.dispose();
     assert.equal(routes.size, 0, 'unload must unregister routes');
     const store = new Store(path.join(root, 'qq-bridge.sqlite3'));
@@ -138,5 +151,10 @@ try {
   console.log('  ✓ plugin reload replaces archived bindings without submitting a model turn');
   console.log('5 passed, 0 failed');
 } finally {
-  fs.rmSync(root, { recursive: true, force: true });
+  // Windows 上库句柄没放干净时 rmSync 会 EPERM；别让清理异常盖掉真正的断言失败。
+  try {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  } catch (error) {
+    console.log('cleanup failed:', error.code, error.path);
+  }
 }

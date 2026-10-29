@@ -2790,6 +2790,115 @@ await test('AI 语音结果未知时记 UNKNOWN：不刷新窗口、不许自动
   } finally { client.kill(); bridge.db.close(); }
 });
 
+console.log('\nqq_send_voice: 语音库');
+
+/**
+ * 造一个最小语音库。
+ *
+ * 发送链路只把路径交给 SnowLuma（真正解码/SILK 转换在那边），
+ * 所以这里用一段假字节就够 —— 要测的是路径边界、能力位、记账和幂等。
+ */
+function makeVoiceLibrary(dir, entries) {
+  fs.mkdirSync(path.join(dir, 'clips'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'clips', 'test.mp3'), Buffer.alloc(2048, 7));
+  fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(entries));
+  return dir;
+}
+
+await test('qq_send_voice 发语音库音频：record 段、语音记账、唤醒窗口、幂等重放', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  const ledger = new EpisodeLedger(bridge);
+  const ref = ledger.origin('group:111', { qq: '222', messageId: 'sing', text: '唱一下雨爱' });
+  bridge.setState('qq-bridge:voice-library-root', makeVoiceLibrary(path.join(dir, 'voices'), [
+    { id: 'yuai', file: 'clips/test.mp3', label: '雨爱(司凤版)', spoken: '唱了一段《雨爱》', durationMs: 140000 },
+  ]));
+  bridge.setState('qq-bridge:episodic-memory', 'true');
+  // 只授 send_sticker：语音与表情同属富媒体气泡，既有部署不额外加 send_voice 也能用
+  const client = startSayClient(bridge.path, 'send_sticker');
+  try {
+    await client.init();
+    const before = onebot.calls.length;
+    const sent = await client.call('qq_send_voice', { name: '雨爱', source_ref: ref, idem_key: 'voice-clip-1' });
+    assert.equal(sent.isError, false, sent.text);
+    assert.equal(sent.raw.structuredContent.receipt.status, 'SUCCEEDED');
+    assert.equal(onebot.calls.length, before + 1);
+    const call = onebot.calls.at(-1);
+    assert.equal(call.action, 'send_group_msg');
+    assert.equal(call.params.group_id, 111);
+    assert.equal(call.params.message[0].type, 'record');
+    assert.match(call.params.message[0].data.file, /clips[\\/]test\.mp3$/);
+    assert.ok(bridge.getState('qq-bridge:speech:group:111'), '语音也要刷新唤醒窗口');
+    assert.ok(
+      bridge.readEvents('group:111', { latest: true }).messages.some(
+        (m) => m.kind === 'self_message' && m.payload.text === '[语音：雨爱(司凤版)] 唱了一段《雨爱》'),
+      '账本里要能看出唱了什么，而不是只剩 [record] 占位',
+    );
+
+    const replay = await client.call('qq_send_voice', { name: '雨爱', source_ref: ref, idem_key: 'voice-clip-1' });
+    assert.match(replay.text, /幂等重放/);
+    assert.equal(onebot.calls.length, before + 1);
+  } finally { client.kill(); bridge.db.close(); }
+});
+
+await test('语音库列表、能力位、名字歧义、越界路径与 record 旁路', async () => {
+  const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
+  const ledger = new EpisodeLedger(bridge);
+  const ref = ledger.origin('group:111', { qq: '222', messageId: 'sing2', text: '再唱一个' });
+  bridge.setState('qq-bridge:voice-library-root', makeVoiceLibrary(path.join(dir, 'voices'), [
+    { id: 'a', file: 'clips/test.mp3', label: '雨爱一', spoken: '一' },
+    { id: 'b', file: 'clips/test.mp3', label: '雨爱二', spoken: '二' },
+    { id: 'twice', file: 'clips/test.mp3', label: '连发曲', spoken: '三' },
+    { id: 'escape', file: '../outside.mp3', label: '越界曲' },
+  ]));
+
+  // 能力位：只授读权限时不能发（库根仍要配上，否则先撞"库不存在"而不是能力位）
+  const deniedStore = new Store(path.join(dir, 'denied.sqlite3'));
+  const deniedRef = new EpisodeLedger(deniedStore).origin('group:111', { qq: '222', messageId: 'denied', text: '唱' });
+  deniedStore.setState('qq-bridge:voice-library-root', bridge.getState('qq-bridge:voice-library-root'));
+  const denied = startSayClient(deniedStore.path, 'read_group_info');
+  try {
+    await denied.init();
+    const res = await denied.call('qq_send_voice', { name: '雨爱一', source_ref: deniedRef });
+    assert.equal(res.isError, true);
+    assert.match(res.text, /send_voice/);
+  } finally {
+    denied.kill();
+    deniedStore.db.close();
+  }
+
+  const client = startSayClient(bridge.path, 'send_sticker,send_text');
+  try {
+    await client.init();
+    const list = await client.call('qq_voice_library', {});
+    assert.equal(list.isError, false, list.text);
+    for (const label of ['雨爱一', '雨爱二', '连发曲']) assert.match(list.text, new RegExp(label));
+    assert.doesNotMatch(list.text, /\.mp3/, '给模型的清单不该带文件名');
+
+    const ambiguous = await client.call('qq_send_voice', { name: '雨爱', source_ref: ref });
+    assert.equal(ambiguous.isError, true);
+    assert.match(ambiguous.text, /雨爱一/);
+
+    const escape = await client.call('qq_send_voice', { name: '越界曲', source_ref: ref });
+    assert.equal(escape.isError, true);
+    assert.match(escape.text, /越界/);
+
+    const before = onebot.calls.length;
+    assert.equal((await client.call('qq_send_voice', { name: '连发曲', source_ref: ref })).isError, false);
+    // 语音不设冷却、也不设小时闸：连着两条都要放行（限流只会让"点了歌却发不出去"）
+    const twice = await client.call('qq_send_voice', { name: '连发曲', source_ref: ref });
+    assert.equal(twice.isError, false, twice.text);
+    assert.equal(onebot.calls.length, before + 2);
+
+    // record 段不能再借 qq_send_group_msg 绕过库边界与语音小时闸
+    const viaSegment = await client.call('qq_send_group_msg',
+      { group_id: 111, message: [{ type: 'record', data: { file: 'C:/x.mp3' } }] });
+    assert.equal(viaSegment.isError, true);
+    assert.match(viaSegment.text, /qq_send_voice/);
+    const viaCq = await client.call('qq_send_group_msg', { group_id: 111, message: '[CQ:record,file=file:///C:/x.mp3]' });
+    assert.equal(viaCq.isError, true);
+  } finally { client.kill(); bridge.db.close(); }
+});
+
 onebot.server.close();
 
 console.log(`\n${passed} passed, ${failed} failed`);

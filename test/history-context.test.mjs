@@ -78,6 +78,9 @@ function fakeCtx(sessionController) {
     sessionController,
     get: (n) => (n === 'sessionController' ? sessionController : undefined),
     webServer: { register: (r) => (routes.push(r), () => {}) },
+    // 宿主给了事件总线（B 站外部消息走 ctx.on 进来）；假的 ctx 也得有一个，
+    // 否则 handle 一构造就 TypeError，测试会整片红。
+    on: () => () => {},
     effect: (fn) => {
       const d = fn();
       return typeof d === 'function' ? d : () => {};

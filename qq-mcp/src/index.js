@@ -8,6 +8,7 @@ import { EpisodeLedger } from '../../lib/memory/episodes.mjs';
 import { CHAT_TOOLS, ADMIN_TOOLS } from '../../lib/agent/tool-sets.mjs';
 import { extractAtMentions, atMarkerTokens, literalAtTarget } from '../../lib/domain/reply-policy.mjs';
 import { workspaceRoot, WORKSPACE_STATE_KEY, workspaceAction, readWorkspaceFile, snapshotFile, fileName } from '../../lib/agent/workspace.mjs';
+import { VOICE_LIBRARY_STATE_KEY, voiceLibraryRoot, loadVoiceLibrary, matchClip, resolveClip, formatDuration } from '../../lib/agent/voice-library.mjs';
 import { recordFileProgress } from '../../lib/agent/file-progress.mjs';
 import { assertExecutionSource, crossConversationAllowed } from '../../lib/agent/execution-scope.mjs';
 import { checkToolFloor } from '../../lib/conversation/floor.mjs';
@@ -166,8 +167,9 @@ const QUOTA = {
   profilePerDay: Number(process.env.QQ_QUOTA_PROFILE_PER_DAY ?? 3),
   // 表情回应：轻量但仍对别人可见，别让它变成刷屏
   reactPerMinute: Number(process.env.QQ_QUOTA_REACT_PER_MINUTE ?? 10),
-  // QQ AI 语音：比文字"响"得多（不能扫读、必须外放），测试阶段先收得很紧
-  voicePerHour: Number(process.env.QQ_QUOTA_VOICE_PER_HOUR ?? 10),
+  // 语音（AI 合成与语音库）默认**不限**：点歌/念一段是低频动作，而限流只会让
+  // "答应了却发不出去"。要收就显式设 QQ_QUOTA_VOICE_PER_HOUR > 0。
+  voicePerHour: Number(process.env.QQ_QUOTA_VOICE_PER_HOUR ?? 0),
   // 群资料读取（公告/精华/历史）会拉不少文本进上下文，单独限
   groupInfoPerHour: Number(process.env.QQ_QUOTA_GROUP_INFO_PER_HOUR ?? 30),
 };
@@ -843,7 +845,7 @@ const TOOLS = [
   },
   {
     name: 'qq_send_group_msg',
-    description: '在指定 QQ 群里发一条消息。可以发纯文本，也可以发 QQ 内置表情、图片、@某人。',
+    description: '在指定 QQ 群里发一条消息。可以发纯文本，也可以发 QQ 内置表情、图片、@某人。若由桥接最终正文分享 B站视频，必须把标题和完整 URL 放在同一对 `『』` 内：`『视频标题\nhttps://www.bilibili.com/video/BV...』`；若直接调用本工具投递，message 本身已经是一条 QQ 消息，不要把 `『』` 标记原样传入，直接在同一个 message 中放标题和完整 URL。不要只发 BV 号，也不要生成 magnet:? 磁力链接。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -865,7 +867,7 @@ const TOOLS = [
   },
   {
     name: 'qq_send_private_msg',
-    description: '给指定 QQ 号发一条私聊消息。可以发纯文本，也可以发 QQ 内置表情、图片。',
+    description: '给指定 QQ 号发一条私聊消息。可以发纯文本，也可以发 QQ 内置表情、图片。若由桥接最终正文分享 B站视频，必须把标题和完整 URL 放在同一对 `『』` 内：`『视频标题\nhttps://www.bilibili.com/video/BV...』`；若直接调用本工具投递，message 本身已经是一条 QQ 消息，不要把 `『』` 标记原样传入，直接在同一个 message 中放标题和完整 URL。不要只发 BV 号，也不要生成 magnet:? 磁力链接。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -949,6 +951,31 @@ const TOOLS = [
       required: ['group_id', 'text'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'qq_send_voice',
+    description:
+      '把语音库里现成的音频（歌、录音、自定义音色）作为 QQ 语音气泡发到当前会话。name 填库里的名字或关键词，例如「雨爱」。'
+      + '对方点歌、让你唱、想听你的声音时用它（不要用 qq_send_file 发 mp3，那样只是一张文件卡片）。'
+      + '示范：对方说“唱一下雨爱” → name="雨爱(司凤版)"。语音不能扫读，一条就够，别连发。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: '语音库里的名字或关键词，例如 "雨爱"；不确定就先调 qq_voice_library 看全部。',
+        },
+        idem_key: IDEM_PARAM,
+      },
+      required: ['name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'qq_voice_library',
+    description:
+      '列出语音库里可发的音频：名字、时长、用途。提示词里只列前几条；点歌前不确定名字时先查它。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'qq_list_custom_faces',
@@ -1456,16 +1483,33 @@ async function applyAtMarkers(message, kind, id) {
  * 走幂等 + 配额：同一个 idemKey 重放不会重复发；
  * 结果未知（超时/断连）记为 UNKNOWN 并**明确告知调用方不要重试**。
  */
-async function sendMessage(kind, idKey, id, args, { capability = 'send_text', idemKey = '', sourceRef = args.source_ref,
-  filePayload = null, fileText = '' } = {}) {
+async function sendMessage(kind, idKey, id, args, { capability = 'send_text', capabilityAny = null,
+  capabilityWhy = '',
+  idemKey = '', sourceRef = args.source_ref,
+  filePayload = null, fileText = '', textOverride = '', allowTypes = [], extraBuckets = [] } = {}) {
   if (!Number.isSafeInteger(id) || id <= 0) {
     throw new Error(`${idKey} 必须是正整数 QQ 号/群号`);
   }
   assertAllowed(kind, id);
-  assertCapability(capability);
-  if (!filePayload && (Array.isArray(args.message) ? args.message.some((part) => part?.type === 'file')
-    : /\[CQ:file[,\]]/i.test(String(args.message))))
-    throw new Error('发送文件请使用 qq_send_file，只允许当前独立工作区内的文件');
+  if (capabilityAny) assertAnyCapability(capabilityAny, capabilityWhy);
+  else assertCapability(capability);
+  /**
+   * 富媒体段只走各自的专用工具。
+   *
+   * `record` 和 `file` 一样：段里的 file 是本机绝对路径，SnowLuma 会直接读它
+   * 转成语音气泡发出去。放行它等于让一条群消息就能把操作者机器上的任意音频
+   * 发进群，而且绕开 qq_send_voice 的库边界、小时闸和 `[语音：…]` 记账。
+   * 语音的唯一内部通道是 allowTypes（只有 sendVoiceClip 用）。
+   */
+  if (!filePayload) {
+    const parts = Array.isArray(args.message) ? args.message : [];
+    const hasFile = parts.some((part) => part?.type === 'file') ||
+      (typeof args.message === 'string' && /\[CQ:file[,\]]/i.test(args.message));
+    if (hasFile) throw new Error('发送文件请使用 qq_send_file，只允许当前独立工作区内的文件');
+    const hasRecord = !allowTypes.includes('record') && (parts.some((part) => part?.type === 'record') ||
+      (typeof args.message === 'string' && /\[CQ:record[,\]]/i.test(args.message)));
+    if (hasRecord) throw new Error('发送语音请使用 qq_send_voice（语音库）或 qq_send_ai_voice（念文本）');
+  }
   if (!filePayload) assertLength(args.message);
 
   /**
@@ -1515,13 +1559,13 @@ async function sendMessage(kind, idKey, id, args, { capability = 'send_text', id
   const floor = checkSpeakingFloor();
   if (floor.action !== 'keep' && !store?.getReceipt?.(key)) return declineFloor(floor);
   /** 记进桥接窗口/情节记忆的是"人看到的样子"，不是带标记的原文。 */
-  const text = filePayload
+  const text = textOverride || (filePayload
     ? fileText
     : typeof outbound.text === 'string' && outbound.text
       ? outbound.text
       : (outbound.message ?? []).map((p) =>
           p.type === 'text' ? p.data?.text ?? '' : p.type === 'at' ? '@' + p.data?.qq : `[${p.type}]`,
-        ).join('');
+        ).join(''));
   const remember = (status, onebotId = null) => {
     if (bridgeStore?.getState('qq-bridge:episodic-memory') === 'true')
       episodeLedger.action({ id: key, sourceRef, conversation, text, state: status, onebotId });
@@ -1541,6 +1585,7 @@ async function sendMessage(kind, idKey, id, args, { capability = 'send_text', id
           limit: QUOTA.sendPerHour,
           label: '发送每小时',
         },
+        ...extraBuckets,
       ])
     : { action: 'send', receipt: null };
 
@@ -1733,6 +1778,88 @@ async function sendAiVoice(args) {
   }
 }
 
+// ---------------------------------------------------------------- 语音库
+//
+// 和上面那条"合成语音"是两件事：这里发的是**已经录好/烘培好的音频文件**
+// （点歌、自己的录音、固定音色），SnowLuma 读本机路径 → ffmpeg 转 NT SILK → 语音气泡。
+// 库根由桥接写进共享库（qq-mcp 是独立进程，读不到插件配置），条目与路径校验
+// 都在 lib/agent/voice-library.mjs —— 那里有路径越界、符号链接、大小、时长的全部边界。
+
+/** 库根：优先共享库里的当前配置，其次环境变量，最后 ~/.dsh/qq-voices。 */
+function voiceRoot() {
+  let stateRoot = '';
+  try {
+    stateRoot = bridgeStore?.getState?.(VOICE_LIBRARY_STATE_KEY) ?? '';
+  } catch {
+    stateRoot = '';
+  }
+  return voiceLibraryRoot({ voiceLibraryRoot: stateRoot || '' });
+}
+
+function voiceLibraryList() {
+  const root = voiceRoot();
+  const library = loadVoiceLibrary(root);
+  if (!library.exists)
+    return ok(`语音库还没建：${root} 下没有 index.json。先让部署方用 tools/seed-voice-library.mjs 登记音频。`);
+  if (!library.entries.length) return ok(`语音库（${root}）是空的：index.json 里没有启用的条目。`);
+  const lines = [`语音库（${root}）：共 ${library.entries.length} 条。要发哪条就用 qq_send_voice，name 填括号里的 id 或名字。`];
+  for (const entry of library.entries) {
+    const bits = [entry.label, formatDuration(entry.durationMs)];
+    if (entry.description) bits.push(entry.description);
+    else if (entry.spoken) bits.push(`内容：${entry.spoken}`);
+    lines.push(`· ${bits.join('｜')}（name=${entry.id}）`);
+  }
+  return ok(lines.join('\n'));
+}
+
+/**
+ * 发一条语音库里的音频。
+ *
+ * 与 qq_send_ai_voice 的分工：那边是"文字→腾讯合成"，这边是"现成文件→语音气泡"。
+ * 与 qq_send_file 的分工：那边发文件卡片，这边是能按播放的气泡。
+ */
+async function sendVoiceClip(args) {
+  const name = String(args.name ?? '').trim();
+  if (!name) throw new Error('name 不能为空：用 qq_voice_library 里的名字或关键词');
+  if (!args.source_ref) throw new Error('语音工具只能在本轮 QQ 会话内使用。');
+  const origin = requireSource(args.source_ref);
+  const conversation = origin.conversation;
+  const isGroup = conversation.startsWith('group:');
+  const id = Number(conversation.slice(isGroup ? 6 : 5));
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`会话归属异常：${conversation}`);
+  assertAllowed(isGroup ? 'group' : 'user', id);
+
+  const root = voiceRoot();
+  const library = loadVoiceLibrary(root);
+  if (!library.entries.length)
+    throw new Error(`语音库里没有可用音频（${root}）。先让部署方登记，或改用 qq_send_ai_voice 念文本。`);
+  const { entry } = matchClip(library.entries, name);
+  const clip = resolveClip(root, entry);
+  const kind = isGroup ? 'group' : 'user';
+  const idKey = isGroup ? 'group_id' : 'user_id';
+  const spoken = `[语音：${entry.label}]${entry.spoken ? ` ${entry.spoken}` : ''}`;
+  if (DRY_RUN) return ok(`[dry-run] 未真实发送语音「${entry.label}」（${clip.file}）到 ${conversation}`);
+
+  // 语音不做额外限流：谁也不会拿它刷屏，而多一道闸只会让"点了歌却发不出去"。
+  // 每分钟发送间隔、能力位、路径/时长/哈希校验都还在，那是安全边界，不是配额。
+  const buckets = QUOTA.voicePerHour > 0
+    ? [{ bucket: 'mcp:voice:h:' + id, windowMs: 3600000, limit: QUOTA.voicePerHour, label: '语音每小时' }]
+    : [];
+
+  return sendMessage(kind, idKey, id,
+    { message: [{ type: 'record', data: { file: clip.file } }], source_ref: args.source_ref },
+    {
+      // 语音与表情同属富媒体气泡：只授了 send_sticker 的既有部署也能用（与 AI 语音一致）。
+      capabilityAny: ['send_voice', 'send_sticker'],
+      capabilityWhy: '语音和表情同属富媒体气泡：授 send_voice 或 send_sticker 任一即可；要单独收回语音，两个都去掉。',
+      sourceRef: args.source_ref,
+      idemKey: args.idem_key || '',
+      textOverride: spoken,
+      allowTypes: ['record'],
+      extraBuckets: buckets,
+    });
+}
+
 /**
  * 管理类动作的统一出口。
  *
@@ -1824,6 +1951,7 @@ const MUTATING_TOOLS = new Set([
   'qq_send_library_sticker',
   'qq_send_mface',
   'qq_send_ai_voice',
+  'qq_send_voice',
   'qq_delete_msg',
   'qq_poke',
   'qq_handle_add_request',
@@ -1835,7 +1963,7 @@ const MUTATING_TOOLS = new Set([
 ]);
 const SPEECH_TOOL_NAMES = new Set(['qq_send_group_msg', 'qq_send_private_msg', 'qq_say',
   'qq_send_sticker', 'qq_send_custom_face', 'qq_send_library_sticker', 'qq_send_mface', 'qq_send_file',
-  'qq_send_ai_voice']);
+  'qq_send_ai_voice', 'qq_send_voice']);
 /**
  * 工具能力和工具可见性是两件事：QQ_CAPABILITIES 控制能否执行，
  * QQ_TOOLSET 控制模型每轮需要阅读哪些 schema。默认 all 保持兼容。
@@ -2143,6 +2271,10 @@ async function handle(name, args = {}) {
 
     case 'qq_send_ai_voice':
       return sendAiVoice(args);
+    case 'qq_voice_library':
+      return voiceLibraryList();
+    case 'qq_send_voice':
+      return sendVoiceClip(args);
 
     case 'qq_list_custom_faces': {
       const urls = await fetchCustomFaces();

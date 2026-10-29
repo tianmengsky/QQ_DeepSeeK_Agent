@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../lib/store.mjs';
 import { assertConfig } from '../lib/config.mjs';
-import { runHeartbeat, gateShouldSpeak } from '../lib/application/heartbeat.mjs';
+import { runHeartbeat, gateShouldSpeak, heartbeatSchedule, pokeHeartbeat } from '../lib/application/heartbeat.mjs';
 import { rig, message, request, response } from './helpers/bridge.mjs';
 import { observeFloor } from '../lib/conversation/floor.mjs';
 
@@ -441,6 +441,22 @@ try {
     assert.ok(entry.heartbeatTimerDueAt > Date.now());
     r.state.persistEnabled(false);
     assert.equal(entry.heartbeatTimer, null);
+  });
+  await test('面板「现在催一次」跳过一次冷却，没事可做时给出理由', () => {
+    const config = { heartbeatEnabled: true, heartbeatUnreadThreshold: 10, heartbeatCooldownMs: 600000 };
+    const now = Date.now();
+    const entry = { pending: [{ createdAt: now }], lastSpokeAt: now, lastHeartbeatCheckAt: now };
+    // 刚说过话：常规调度还没到期
+    assert.ok(heartbeatSchedule(config, entry, now).dueAt > now);
+    assert.deepEqual(pokeHeartbeat({ entry: () => entry }, 'group:1'), { ok: true, pending: 1 });
+    const forced = heartbeatSchedule(config, entry, now);
+    assert.equal(forced.trigger, 'forced');
+    assert.ok(forced.dueAt <= now, '催一次要立刻到期');
+    // 没有待处理消息时不能假装排上了
+    const idle = pokeHeartbeat({ entry: () => ({ pending: [] }) }, 'group:1');
+    assert.equal(idle.ok, false);
+    assert.match(idle.error, /没有待处理/);
+    assert.equal(pokeHeartbeat({ entry: () => null }, 'group:1').ok, false, '不存在的会话要说清楚');
   });
   console.log(`${passed} passed, 0 failed`);
 } finally {

@@ -76,6 +76,7 @@ export function rig(settings = {}, reply = '你好', store = null, llm = null) {
     prompts = [],
     warnings = [];
   let sessions = 0;
+  const eventListeners = new Map();
   globalThis.fetch = async (url, init) => {
     const action = String(url).split('/').pop();
     calls.push({ action, payload: JSON.parse(init?.body ?? '{}') });
@@ -94,6 +95,15 @@ export function rig(settings = {}, reply = '你好', store = null, llm = null) {
     };
   };
   const ctx = {
+    on: (name, listener) => {
+      const listeners = eventListeners.get(name) ?? new Set();
+      listeners.add(listener);
+      eventListeners.set(name, listeners);
+      return () => listeners.delete(listener);
+    },
+    emit: (name, payload) => {
+      for (const listener of eventListeners.get(name) ?? []) listener(payload);
+    },
     logger: {
       info() {},
       warn(m) {

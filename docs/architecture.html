@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>dsh-qq-bridge · 架构图</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #2a3340;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --accent: #58a6ff;
+    /* per-layer accents */
+    --c-ingress: #f78166;
+    --c-domain: #d2a8ff;
+    --c-conv: #56d364;
+    --c-app: #58a6ff;
+    --c-agent: #f0883e;
+    --c-prompt: #e3b341;
+    --c-memory: #39c5cf;
+    --c-delivery: #ff7b72;
+    --c-extern: #7ee787;
+    --c-store: #c9d1d9;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    font-size: 14px;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 22px 60px; }
+  header.top { border-bottom: 1px solid var(--border); padding-bottom: 18px; margin-bottom: 22px; }
+  header.top h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: .5px; }
+  header.top .sub { color: var(--muted); font-size: 14px; max-width: 880px; }
+  .badges { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .badge { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 11px; font-size: 12px; color: var(--muted); }
+
+  .layout { display: grid; grid-template-columns: 1fr 340px; gap: 22px; align-items: start; }
+  @media (max-width: 1020px) { .layout { grid-template-columns: 1fr; } aside.info { position: static !important; } }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 22px; font-size: 12.5px; color: var(--muted); }
+  .legend .it { display: flex; align-items: center; gap: 6px; }
+  .legend .sw { width: 13px; height: 13px; border-radius: 3px; display: inline-block; }
+
+  /* external band */
+  .extern { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 6px; }
+  @media (max-width: 760px) { .extern { grid-template-columns: 1fr; } }
+  .ext-card {
+    background: linear-gradient(160deg, rgba(126,231,135,.08), var(--panel));
+    border: 1px solid var(--border); border-left: 4px solid var(--c-extern);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .ext-card h3 { margin: 0 0 6px; font-size: 15px; color: var(--c-extern); }
+  .ext-card p { margin: 0; color: var(--muted); font-size: 12.5px; }
+
+  .flow-arrow { text-align: center; color: var(--muted); font-size: 12px; margin: 8px 0; letter-spacing: 2px; }
+
+  /* layers */
+  .layer { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px 16px; margin-bottom: 10px; }
+  .layer > .lhead { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .layer > .lhead .dot { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; transform: translateY(1px); }
+  .layer > .lhead h2 { margin: 0; font-size: 16px; }
+  .layer > .lhead .tag { color: var(--muted); font-size: 12px; }
+  .chip-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 11px; font-size: 12.5px; cursor: pointer; transition: .12s;
+    border-left: 3px solid var(--lc, var(--accent)); user-select: none;
+  }
+  .chip:hover { border-color: var(--lc); background: #222b3a; transform: translateY(-1px); }
+  .chip.active { outline: 2px solid var(--lc); background: #232e40; }
+  .chip .path { color: var(--muted); font-size: 11px; display: block; }
+
+  /* info aside */
+  aside.info { position: sticky; top: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-height: 220px; }
+  aside.info h3 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
+  aside.info .meta { font-size: 11.5px; color: var(--muted); margin-bottom: 10px; }
+  aside.info .desc { font-size: 13px; color: var(--text); }
+  aside.info .empty { color: var(--muted); font-size: 13px; }
+  aside.info .role { display:inline-block; margin-top:10px; font-size:11.5px; padding:2px 8px; border-radius:6px; background:var(--panel-2); border:1px solid var(--border); color:var(--muted);}
+
+  /* data flow */
+  .section-title { font-size: 17px; margin: 30px 0 12px; padding-top: 14px; border-top: 1px dashed var(--border); }
+  .pipeline { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; min-width: 150px; flex: 1 1 150px; }
+  .step .n { color: var(--accent); font-size: 12px; font-weight: 600; }
+  .step .t { font-size: 13.5px; margin-top: 3px; }
+  .step .d { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  .arrow { display: flex; align-items: center; color: var(--muted); padding: 0 6px; font-size: 18px; }
+
+  /* lifecycle */
+  .life { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:12px; }
+  .life .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 13px 15px; }
+  .life .card h4 { margin: 0 0 6px; font-size: 13.5px; color: var(--c-conv); }
+  .life .card p { margin: 0; font-size: 12px; color: var(--muted); }
+
+  .note { margin-top: 28px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .note code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; color: var(--c-prompt); }
+  footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>dsh-qq-bridge · 系统架构图</h1>
+    <div class="sub">
+      QQ ⇄ DSH 桥接插件。以 <b>cordis 插件</b>形式运行在 DSH 宿主内：通过 HTTP 接收 OneBot v11 事件，
+      驱动一个 DSH Agent 会话（模型由宿主运行），再把模型产出的气泡/表情经 <b>qq-mcp</b> 子进程发回 QQ。
+      全部跨进程/跨重启状态落在共享 SQLite。
+    </div>
+    <div class="badges">
+      <span class="badge">Node ≥ 24.10</span>
+      <span class="badge">cordis ~4.0.4 插件</span>
+      <span class="badge">OneBot v11</span>
+      <span class="badge">SQLite 持久化</span>
+      <span class="badge">MCP 子进程 (qq-mcp)</span>
+      <span class="badge">87 模块 · lib/</span>
+    </div>
+  </header>
+
+  <div class="legend">
+    <span class="it"><span class="sw" style="background:var(--c-extern)"></span>外部系统 / 进程边界</span>
+    <span class="it"><span class="sw" style="background:var(--c-ingress)"></span>接入与传输</span>
+    <span class="it"><span class="sw" style="background:var(--c-domain)"></span>领域规则</span>
+    <span class="it"><span class="sw" style="background:var(--c-conv)"></span>会话与上下文</span>
+    <span class="it"><span class="sw" style="background:var(--c-app)"></span>编排与业务</span>
+    <span class="it"><span class="sw" style="background:var(--c-agent)"></span>Agent 集成</span>
+    <span class="it"><span class="sw" style="background:var(--c-prompt)"></span>提示词</span>
+    <span class="it"><span class="sw" style="background:var(--c-memory)"></span>记忆</span>
+    <span class="it"><span class="sw" style="background:var(--c-delivery)"></span>投递</span>
+    <span class="it"><span class="sw" style="background:var(--c-store)"></span>持久化</span>
+  </div>
+
+  <div class="layout">
+    <main>
+      <!-- EXTERNAL -->
+      <div class="extern">
+        <div class="ext-card">
+          <h3>① QQ 客户端 / OneBot v11 接入端</h3>
+          <p>go-cqhttp / SnowLuma 等。事件来源（消息、notice、request）与消息出口。桥接只说 OneBot 协议。</p>
+        </div>
+        <div class="ext-card">
+          <h3>② DSH · Cordis 宿主</h3>
+          <p>加载本插件，提供 <code>webServer</code> / <code>sessionController</code>，运行 cordis 框架并跑模型推理。</p>
+        </div>
+        <div class="ext-card">
+          <h3>③ qq-mcp（独立进程）</h3>
+          <p>MCP stdio 子进程，向 Agent 提供 QQ 发送/读取/管理工具；与桥接共享 SQLite 的 runtime_state 做交接。</p>
+        </div>
+      </div>
+
+      <div class="flow-arrow">▼ 事件下行 · 回复上行 ▼</div>
+
+      <!-- LAYER 0 INGRESS -->
+      <section class="layer" style="border-left:4px solid var(--c-ingress)">
+        <div class="lhead"><span class="dot" style="background:var(--c-ingress)"></span>
+          <h2>接入与传输层</h2><span class="tag">routes / transport · HTTP 边界</span></div>
+        <div class="chip-grid" data-layer="ingress">
+          <div class="chip" data-key="routes/onebot" style="--lc:var(--c-ingress)">routes/onebot.mjs<span class="path">事件入口 · 鉴权 · 路由</span></div>
+          <div class="chip" data-key="routes/control" style="--lc:var(--c-ingress)">routes/control.mjs<span class="path">托管开关切换</span></div>
+          <div class="chip" data-key="routes/status" style="--lc:var(--c-ingress)">routes/status.mjs<span class="path">自检快照</span></div>
+          <div class="chip" data-key="transport/http" style="--lc:var(--c-ingress)">transport/http.mjs<span class="path">HTTP 工具</span></div>
+          <div class="chip" data-key="transport/onebot-client" style="--lc:var(--c-ingress)">transport/onebot-client.mjs<span class="path">反向 OneBot 调用</span></div>
+          <div class="chip" data-key="transport/media" style="--lc:var(--c-ingress)">transport/media.mjs<span class="path">媒体寻址</span></div>
+          <div class="chip" data-key="transport/persistence" style="--lc:var(--c-ingress)">transport/persistence.mjs<span class="path">加载 Store</span></div>
+          <div class="chip" data-key="store" style="--lc:var(--c-ingress)">store.mjs<span class="path">SQLite 核心</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 1 DOMAIN -->
+      <section class="layer" style="border-left:4px solid var(--c-domain)">
+        <div class="lhead"><span class="dot" style="background:var(--c-domain)"></span>
+          <h2>领域规则层</h2><span class="tag">domain · 准入 / 事件 / 回复策略</span></div>
+        <div class="chip-grid" data-layer="domain">
+          <div class="chip" data-key="domain/admission" style="--lc:var(--c-domain)">admission.mjs<span class="path">shouldRespond / 白名单</span></div>
+          <div class="chip" data-key="domain/events" style="--lc:var(--c-domain)">events.mjs<span class="path">renderMessage / 归一化</span></div>
+          <div class="chip" data-key="domain/reply-policy" style="--lc:var(--c-domain)">reply-policy.mjs<span class="path">气泡 / 配额 / [SKIP]</span></div>
+          <div class="chip" data-key="domain/stickers" style="--lc:var(--c-domain)">stickers.mjs<span class="path">收藏表情目录</span></div>
+          <div class="chip" data-key="domain/time" style="--lc:var(--c-domain)">time.mjs<span class="path">时间校准</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 2 CONVERSATION -->
+      <section class="layer" style="border-left:4px solid var(--c-conv)">
+        <div class="lhead"><span class="dot" style="background:var(--c-conv)"></span>
+          <h2>会话与上下文层</h2><span class="tag">conversation · 每会话状态 / 串行化</span></div>
+        <div class="chip-grid" data-layer="conv">
+          <div class="chip" data-key="conversation/registry" style="--lc:var(--c-conv)">registry.mjs<span class="path">会话注册表</span></div>
+          <div class="chip" data-key="conversation/context" style="--lc:var(--c-conv)">context.mjs<span class="path">滑动窗口</span></div>
+          <div class="chip" data-key="conversation/floor" style="--lc:var(--c-conv)">floor.mjs<span class="path">抢话 / 插话</span></div>
+          <div class="chip" data-key="conversation/activity" style="--lc:var(--c-conv)">activity.mjs<span class="path">清醒窗口</span></div>
+          <div class="chip" data-key="conversation/history" style="--lc:var(--c-conv)">history.mjs<span class="path">群历史预取</span></div>
+          <div class="chip" data-key="conversation/injection" style="--lc:var(--c-conv)">injection.mjs<span class="path">上下文注入</span></div>
+          <div class="chip" data-key="conversation/input-batches" style="--lc:var(--c-conv)">input-batches.mjs<span class="path">去抖聚合</span></div>
+          <div class="chip" data-key="conversation/queue" style="--lc:var(--c-conv)">queue.mjs<span class="path">串行化队列</span></div>
+          <div class="chip" data-key="conversation/sessions" style="--lc:var(--c-conv)">sessions.mjs<span class="path">Session 创建 / 轮换</span></div>
+          <div class="chip" data-key="conversation/task-ledger" style="--lc:var(--c-conv)">task-ledger.mjs<span class="path">任务账本</span></div>
+          <div class="chip" data-key="conversation/task-routing" style="--lc:var(--c-conv)">task-routing.mjs<span class="path">持久任务路由</span></div>
+          <div class="chip" data-key="conversation/task-ownership" style="--lc:var(--c-conv)">task-ownership.mjs<span class="path">文件归属</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 3 APPLICATION -->
+      <section class="layer" style="border-left:4px solid var(--c-app)">
+        <div class="lhead"><span class="dot" style="background:var(--c-app)"></span>
+          <h2>编排与业务层</h2><span class="tag">application · 回合 / 心跳 / 恢复 / 监视</span></div>
+        <div class="chip-grid" data-layer="app">
+          <div class="chip" data-key="application/execute-turn" style="--lc:var(--c-app)">execute-turn.mjs<span class="path">核心回合执行</span></div>
+          <div class="chip" data-key="application/heartbeat" style="--lc:var(--c-app)">heartbeat.mjs<span class="path">主动插话</span></div>
+          <div class="chip" data-key="application/poke" style="--lc:var(--c-app)">poke.mjs<span class="path">戳一戳</span></div>
+          <div class="chip" data-key="application/notices" style="--lc:var(--c-app)">notices.mjs<span class="path">表情回应</span></div>
+          <div class="chip" data-key="application/requests" style="--lc:var(--c-app)">requests.mjs<span class="path">加好友 / 群</span></div>
+          <div class="chip" data-key="application/reply-decision" style="--lc:var(--c-app)">reply-decision.mjs<span class="path">回应判定</span></div>
+          <div class="chip" data-key="application/reply-recovery" style="--lc:var(--c-app)">reply-recovery.mjs<span class="path">回复恢复</span></div>
+          <div class="chip" data-key="application/self" style="--lc:var(--c-app)">self.mjs<span class="path">自传层</span></div>
+          <div class="chip" data-key="application/login-watch" style="--lc:var(--c-app)">login-watch.mjs<span class="path">登录监视</span></div>
+          <div class="chip" data-key="application/voice" style="--lc:var(--c-app)">voice-transcription.mjs<span class="path">语音转写</span></div>
+          <div class="chip" data-key="application/attention" style="--lc:var(--c-app)">attention.mjs<span class="path">注意力决策</span></div>
+          <div class="chip" data-key="application/debug" style="--lc:var(--c-app)">debug(.mjs/.status).mjs<span class="path">#debug 命令</span></div>
+          <div class="chip" data-key="application/recovery-guard" style="--lc:var(--c-app)">recovery-guard.mjs<span class="path">恢复守卫</span></div>
+          <div class="chip" data-key="application/task-scheduler" style="--lc:var(--c-app)">task-scheduler.mjs<span class="path">任务调度</span></div>
+          <div class="chip" data-key="application/subagent" style="--lc:var(--c-app)">subagent-results.mjs<span class="path">子代理成果</span></div>
+          <div class="chip" data-key="application/turn-scope" style="--lc:var(--c-app)">turn-scope.mjs<span class="path">回合作用域</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 4 AGENT -->
+      <section class="layer" style="border-left:4px solid var(--c-agent)">
+        <div class="lhead"><span class="dot" style="background:var(--c-agent)"></span>
+          <h2>Agent 集成层</h2><span class="tag">agent · 驱动 DSH / 工具 / 跨会话守卫</span></div>
+        <div class="chip-grid" data-layer="agent">
+          <div class="chip" data-key="agent/runner" style="--lc:var(--c-agent)">runner.mjs<span class="path">runTurn · 驱动模型</span></div>
+          <div class="chip" data-key="agent/tool-scope" style="--lc:var(--c-agent)">tool-scope.mjs<span class="path">工具作用域</span></div>
+          <div class="chip" data-key="agent/tool-binding" style="--lc:var(--c-agent)">tool-binding.mjs<span class="path">来源归属</span></div>
+          <div class="chip" data-key="agent/tool-sets" style="--lc:var(--c-agent)">tool-sets.mjs<span class="path">工具集装配</span></div>
+          <div class="chip" data-key="agent/execution-scope" style="--lc:var(--c-agent)">execution-scope.mjs<span class="path">跨会话守卫</span></div>
+          <div class="chip" data-key="agent/workspace" style="--lc:var(--c-agent)">workspace.mjs<span class="path">工作区根</span></div>
+          <div class="chip" data-key="agent/aux" style="--lc:var(--c-agent)">aux-*.mjs<span class="path">归属/退避/超窗/重放…</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 5 PROMPT -->
+      <section class="layer" style="border-left:4px solid var(--c-prompt)">
+        <div class="lhead"><span class="dot" style="background:var(--c-prompt)"></span>
+          <h2>提示词层</h2><span class="tag">prompt · 组装与渲染</span></div>
+        <div class="chip-grid" data-layer="prompt">
+          <div class="chip" data-key="prompt/prepare" style="--lc:var(--c-prompt)">prepare.mjs<span class="path">buildPromptContent</span></div>
+          <div class="chip" data-key="prompt/render" style="--lc:var(--c-prompt)">render.mjs<span class="path">记忆 / 窗口段</span></div>
+          <div class="chip" data-key="prompt/protocol" style="--lc:var(--c-prompt)">protocol.mjs<span class="path">协议说明</span></div>
+          <div class="chip" data-key="prompt/examples" style="--lc:var(--c-prompt)">examples.mjs<span class="path">示例规划</span></div>
+          <div class="chip" data-key="prompt/forward" style="--lc:var(--c-prompt)">forward.mjs<span class="path">转发处理</span></div>
+          <div class="chip" data-key="prompt/quote" style="--lc:var(--c-prompt)">quote.mjs<span class="path">引用</span></div>
+          <div class="chip" data-key="prompt/text-sources" style="--lc:var(--c-prompt)">text-sources.mjs<span class="path">文本 / 表情源</span></div>
+          <div class="chip" data-key="prompt/voice-intent" style="--lc:var(--c-prompt)">voice-intent.mjs<span class="path">语音意图</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 6 MEMORY -->
+      <section class="layer" style="border-left:4px solid var(--c-memory)">
+        <div class="lhead"><span class="dot" style="background:var(--c-memory)"></span>
+          <h2>记忆层</h2><span class="tag">memory · 情景 / 事实 / 提炼 / 反思</span></div>
+        <div class="chip-grid" data-layer="memory">
+          <div class="chip" data-key="memory/memory-store" style="--lc:var(--c-memory)">memory-store.mjs<span class="path">MemoryStore</span></div>
+          <div class="chip" data-key="memory/episodes" style="--lc:var(--c-memory)">episodes.mjs<span class="path">情景记忆</span></div>
+          <div class="chip" data-key="memory/facts" style="--lc:var(--c-memory)">facts.mjs<span class="path">事实记忆</span></div>
+          <div class="chip" data-key="memory/extractor" style="--lc:var(--c-memory)">extractor.mjs<span class="path">事实提炼</span></div>
+          <div class="chip" data-key="memory/reflect" style="--lc:var(--c-memory)">reflect.mjs<span class="path">L4 反思</span></div>
+          <div class="chip" data-key="memory/agent-memory" style="--lc:var(--c-memory)">agent-memory.mjs<span class="path">agent 接口</span></div>
+          <div class="chip" data-key="memory/presentation" style="--lc:var(--c-memory)">presentation.mjs<span class="path">记忆块渲染</span></div>
+          <div class="chip" data-key="memory/flush" style="--lc:var(--c-memory)">flush.mjs<span class="path">回合刷写</span></div>
+          <div class="chip" data-key="memory/tool" style="--lc:var(--c-memory)">tool.mjs<span class="path">内存工具</span></div>
+        </div>
+      </section>
+
+      <!-- LAYER 7 DELIVERY -->
+      <section class="layer" style="border-left:4px solid var(--c-delivery)">
+        <div class="lhead"><span class="dot" style="background:var(--c-delivery)"></span>
+          <h2>投递层</h2><span class="tag">delivery · 拆气泡 / 保序 / 幂等 / 账本</span></div>
+        <div class="chip-grid" data-layer="delivery">
+          <div class="chip" data-key="delivery/reply-delivery" style="--lc:var(--c-delivery)">reply-delivery.mjs<span class="path">拆气泡 / @ / 表情</span></div>
+          <div class="chip" data-key="delivery/send-queue" style="--lc:var(--c-delivery)">send-queue.mjs<span class="path">跨会话发送队列</span></div>
+          <div class="chip" data-key="delivery/outbox" style="--lc:var(--c-delivery)">outbox.mjs<span class="path">幂等发送</span></div>
+          <div class="chip" data-key="delivery/reply-journal" style="--lc:var(--c-delivery)">reply-journal.mjs<span class="path">回复账本</span></div>
+        </div>
+      </section>
+
+      <!-- PERSISTENCE -->
+      <section class="layer" style="border-left:4px solid var(--c-store)">
+        <div class="lhead"><span class="dot" style="background:var(--c-store)"></span>
+          <h2>持久化与配置（横切）</h2><span class="tag">store + config + state</span></div>
+        <div class="chip-grid" data-layer="store">
+          <div class="chip" data-key="store/sqlite" style="--lc:var(--c-store)">qq-bridge.sqlite3<span class="path">会话 / 事件 / 缺口 / 回执 / 自传 / runtime_state</span></div>
+          <div class="chip" data-key="store/memory-dir" style="--lc:var(--c-store)">data/memory<span class="path">记事本投影 *.md</span></div>
+          <div class="chip" data-key="store/files" style="--lc:var(--c-store)">data/*.alert / logs<span class="path">登录告警等</span></div>
+          <div class="chip" data-key="config" style="--lc:var(--c-store)">config.mjs<span class="path">profile 配置</span></div>
+        </div>
+      </section>
+
+      <!-- DATA FLOW -->
+      <h2 class="section-title">核心数据流向（一条消息的生命周期）</h2>
+      <div class="pipeline">
+        <div class="step"><div class="n">① 入站</div><div class="t">POST /qq/onebot</div><div class="d">routes/onebot 鉴权、JSON 解析、按 post_type 分流</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">② 准入</div><div class="t">admission</div><div class="d">shouldRespond / 白名单 / 群私开关；不回应则进 heartbeat 缓冲</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">③ 聚合</div><div class="t">input-batches</div><div class="d">去抖合并窗口内多条消息为一个语义批</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">④ 串行</div><div class="t">registry.run</div><div class="d">queue 保证同一会话回合顺序；ensureSession 持 DSH 游标</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">⑤ 回合</div><div class="t">execute-turn</div><div class="d">拼提示词（窗口+记忆+人设）→ runTurn 驱动模型</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">⑥ 工具</div><div class="t">DSH Agent</div><div class="d">经 qq-mcp 调 QQ 工具（发消息/读历史/管理）</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">⑦ 投递</div><div class="t">delivery</div><div class="d">拆气泡→send-queue 节奏→outbox 幂等→OneBot 出口</div></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="n">⑧ 回执</div><div class="t">journal + store</div><div class="d">记窗口、刷新清醒窗口、写回执；重启可恢复</div></div>
+      </div>
+
+      <!-- LIFECYCLE -->
+      <h2 class="section-title">每会话关键状态与机制</h2>
+      <div class="life">
+        <div class="card"><h4>滑动窗口</h4><p>别人的消息与自己的回复分别设上限（如 10 + 15），避免自言自语挤掉上下文。 trimWindow 裁剪。</p></div>
+        <div class="card"><h4>清醒窗口 (speech)</h4><p>成功发言后开 60s 窗口；窗口内未 @ 的群消息可跟聊。 activity.mjs 统一管理，落库可跨重载恢复。</p></div>
+        <div class="card"><h4>心跳缓冲</h4><p>没被点名的群消息进 pending 缓冲；心跳判定未读阈值/冷却后决定是否主动插话；消费即 ack，避免重载重复恢复。</p></div>
+        <div class="card"><h4>Session 轮换</h4><p>每 N 轮换新 DSH Session，让上下文长度恒定；桥接自拼人设+记忆+窗口。 context-overflow 触发丢弃+轮换。</p></div>
+        <div class="card"><h4>串行化队列</h4><p>每会话一条 Promise 链，禁止按"最后一段文本"猜回合，归属靠 rpcId/inbox 消费确认。</p></div>
+        <div class="card"><h4>跨会话守卫</h4><p>execution-scope 保证同一时刻只对一个会话发工具；active-conversation 键供 qq_say 校验。</p></div>
+        <div class="card"><h4>幂等回执</h4><p>reply-journal + outbox idemKey：发送结果跨重启可恢复，避免重复发或"回复被吞"。</p></div>
+        <div class="card"><h4>记忆预算</h4><p>memoryBlocks 去重+预算+渲染顺序；情景/事实/反思三档，提炼与反思与聊天解耦。</p></div>
+      </div>
+
+      <div class="note">
+        说明：本图基于 <code>lib/</code> 实际源码（bootstrap.mjs 装配、routes/onebot.mjs 入口、registry.mjs、delivery/reply-delivery.mjs、agent/runner.mjs 等）归纳。
+        <code>qq-mcp/</code> 为独立 MCP 子进程，由 DSH 宿主启动并向 Agent 提供 QQ 工具；桥接与其仅通过共享 SQLite 的 <code>runtime_state</code> 交接（如 active-conversation、跨会话开关）。
+        点击上方任意模块卡片可在右侧查看职责说明。
+      </div>
+      <footer>生成于 2026-10-27 · dsh-qq-bridge architecture map</footer>
+    </main>
+
+    <aside class="info">
+      <h3 id="info-title">模块说明</h3>
+      <div class="meta" id="info-meta"></div>
+      <div class="desc empty" id="info-desc">点击左侧任意彩色模块卡片，查看它在本项目中的职责。</div>
+      <span class="role" id="info-role"></span>
+    </aside>
+  </div>
+</div>
+
+<script>
+  const DATA = {
+    "routes/onebot": { layer:"接入与传输", role:"事件入口 · 鉴权 · 路由", desc:"HTTP POST 入口，接收 OneBot v11 事件：鉴权（Bearer token）、JSON 解析、按 post_type 分流到消息/notice（撤回、戳一戳、表情回应）/request（加好友）。GET 返回自检快照。负责去重、语音转写触发、floor/窗口记录与心跳缓冲落库。" },
+    "routes/control": { layer:"接入与传输", role:"托管开关", desc:"POST /qq/onebot/control 切换托管开关。写库持久化 agentEnabled，避免插件重载把托管关掉；开启时触发缓冲恢复、投递恢复、会话绑定恢复、心跳。" },
+    "routes/status": { layer:"接入与传输", role:"自检快照", desc:"组装 GET 状态：在线 build、replyPolicy、发送队列积压、lastError、self（我是谁/在哪些群）、loginWatch 读数、心跳计数。供运维不翻日志即可查状态。" },
+    "transport/http": { layer:"接入与传输", role:"HTTP 工具", desc:"header / readBody / respond / HttpError 等 HTTP 底层封装。" },
+    "transport/onebot-client": { layer:"接入与传输", role:"反向 OneBot 调用", desc:"onebotCall：向接入端发起反向调用，如 get_status、get_login_info、get_group_msg_history、fetch_custom_face、send_group_msg 等。" },
+    "transport/media": { layer:"接入与传输", role:"媒体寻址", desc:"图片等媒体资源的处理与 URL 寻址。" },
+    "transport/persistence": { layer:"接入与传输", role:"加载 Store", desc:"loadStoreModule：按配置加载 SQLite Store 实现（退化时退回纯内存）。" },
+    "store": { layer:"接入与传输", role:"SQLite 核心", desc:"store.mjs + transport/persistence：持久化核心。会话状态、事件表（inbound/self_message + ack）、缺口 gap、reply 账本、自传表、runtime_state。是桥接与 qq-mcp 唯一的交接通道。" },
+
+    "domain/admission": { layer:"领域规则", role:"准入与回应", desc:"admitMessage / shouldRespond / isAllowed：群/私聊开关、白名单、@触发、消息类型过滤。决定一条消息是进回合还是进心跳缓冲。" },
+    "domain/events": { layer:"领域规则", role:"事件归一化", desc:"renderMessage / atTargets / 事件类型判定：把 OneBot 段（文本/图片/转发/record）归一化为可渲染文本，识别被动表情回应、戳一戳等。" },
+    "domain/reply-policy": { layer:"领域规则", role:"回复策略", desc:"气泡切分 splitBubbles、长度/气泡数/发送配额、[SKIP] 静默、@昵称解析、表情标记、去重 collapse。桌面 profile 用 replyShapes:[] 让 LLM 自定气泡。" },
+    "domain/stickers": { layer:"领域规则", role:"收藏表情", desc:"收藏表情目录与按身份键寻址：QQ 收藏列表顺序会翻转，必须按身份键取 URL，避免发成镜像位置的图。" },
+    "domain/time": { layer:"领域规则", role:"时间校准", desc:"validTime 等时间工具，修复重载污染的时间戳，保证窗口顺序按真实时间。" },
+
+    "conversation/registry": { layer:"会话与上下文", role:"会话注册表", desc:"ConversationRegistry：每会话内存态 + 持久化（窗口、pending 缓冲、awakeUntil、心跳退避、Session 游标）。enqueue 串行化；entry/persist 在 HMR/重载间保留状态。" },
+    "conversation/context": { layer:"会话与上下文", role:"滑动窗口", desc:"recordContext / trimWindow / boundedText：滑动窗口管理，别人与自己的消息分别设上限，recentQqs 决定注入谁的记忆。" },
+    "conversation/floor": { layer:"会话与上下文", role:"抢话 / 插话", desc:"readFloor / captureFloor / recordFloorRecall / batchTimeline：管理“谁正在说话”，防止桥接在别人话没说完时抢话，插话前先确认话权。" },
+    "conversation/activity": { layer:"会话与上下文", role:"清醒窗口", desc:"refreshSpeech / wakeAfterSpeech / recordSpeech：60s 清醒窗口计时与恢复，落共享库 qq-bridge:speech:<会话>，重载后恢复。每个气泡/表情刷新窗口。" },
+    "conversation/history": { layer:"会话与上下文", role:"群历史预取", desc:"prefetchHistory：消息一被接纳就异步拉 get_group_msg_history，把耗时藏进合并窗口（p90 曾达 7s）；命中 TTL 则跳过。" },
+    "conversation/injection": { layer:"会话与上下文", role:"上下文注入", desc:"planWindowInjection / commitWindowInjection：在拼提示词前规划并提交窗口片段注入，避免重复计数。" },
+    "conversation/input-batches": { layer:"会话与上下文", role:"去抖聚合", desc:"InputBatches：输入去抖（如 1500ms），把合并窗口内的多条消息聚成一个语义批交给 execute-turn；支持被动反应、等待输入等模式。" },
+    "conversation/queue": { layer:"会话与上下文", role:"串行化队列", desc:"enqueue：每会话一条 Promise 链，回合串行执行，保证归属与顺序。禁止按最后文本猜回合。" },
+    "conversation/sessions": { layer:"会话与上下文", role:"Session 管理", desc:"ensureSession / rotateAfterContextOverflow / sessionSignature：DSH Session 创建与轮换（每 N 轮换新），上下文恒定；归档/签名变更时重建绑定。" },
+    "conversation/task-ledger": { layer:"会话与上下文", role:"任务账本", desc:"TaskLedger：记录每个 turn 的状态（handled/waiting_input/failed），用于视图与恢复，防止任务永久 busy。" },
+    "conversation/task-routing": { layer:"会话与上下文", role:"持久任务路由", desc:"TaskRouting：把带 turn_id 的执行路由到持久任务，支持挂起/恢复计划（如带 @ 的延迟动作）。" },
+    "conversation/task-ownership": { layer:"会话与上下文", role:"文件归属", desc:"fileAuthority：任务/文件的归属判定，避免跨会话误写他人文件。" },
+
+    "application/execute-turn": { layer:"编排与业务", role:"核心回合", desc:"execute-turn：核心回合执行——发布 active-conversation、拼提示词（窗口+记忆+人设）、runTurn 跑模型、queueReply 发回复、记窗口、刷新清醒窗口、处理上下文溢出（丢弃+轮换）。" },
+    "application/heartbeat": { layer:"编排与业务", role:"主动插话", desc:"心跳：按未读阈值/冷却周期扫描群缓冲，决定是否主动插话（requestHeartbeat）。连续失败退避，落库避免重载重试风暴。" },
+    "application/poke": { layer:"编排与业务", role:"戳一戳", desc:"processPoke：默认 wake 模式——不回合成消息、回戳一次并开清醒窗口；agent 模式会合成消息提交 DSH。回戳失败也照开窗口。" },
+    "application/notices": { layer:"编排与业务", role:"表情回应", desc:"handleReactionNotice：处理 group_msg_emoji_like 表情回应事件，区分“给我的赞”与“别人的赞”（靠 ownMessageIds）。" },
+    "application/requests": { layer:"编排与业务", role:"加好友/群", desc:"handleAddRequest：处理加好友/加群请求（与踢人等一样需人批准的动作为 qq-mcp 侧授权）。" },
+    "application/reply-decision": { layer:"编排与业务", role:"回应判定", desc:"reply-decision：是否回应的判定支撑，与 attention 协同做注意力决策。" },
+    "application/reply-recovery": { layer:"编排与业务", role:"回复恢复", desc:"recoverReplies：启动时/定时恢复未投递的回复，按原会话与幂等编号接续，自愈卡死的死任务（曾实测卡 4 天）。" },
+    "application/self": { layer:"编排与业务", role:"自传层", desc:"SelfLedger：只读账号事实（我是谁、在哪些群）。不挂托管开关——托管关着时更需要知道账号是否在线。" },
+    "application/login-watch": { layer:"编排与业务", role:"登录监视", desc:"LoginWatch：定期探 get_status/get_login_info，把“被踢下线”变成可查读数并写告警文件；补记重载期间发生的掉线。" },
+    "application/voice": { layer:"编排与业务", role:"语音转写", desc:"voice-transcription：把 record 语音段转写为文本再进上下文；awaitIncomingVoices 等待在途转写。" },
+    "application/attention": { layer:"编排与业务", role:"注意力决策", desc:"evaluateAttention / observeWithoutReply：主动插话与注意力计算，决定“此刻该不该说话”。lastAttentionDecision 落库。" },
+    "application/debug": { layer:"编排与业务", role:"调试命令", desc:"debug / debug-status：#debug 系列命令与状态读取（如 #debug self），供运维介入诊断。" },
+    "application/recovery-guard": { layer:"编排与业务", role:"恢复守卫", desc:"createRecoveryGuard：带自检探针的恢复守卫（如 storeHealthy 用 PRAGMA quick_check），避免永不收敛的恢复环。" },
+    "application/task-scheduler": { layer:"编排与业务", role:"任务调度", desc:"TaskScheduler：admit/tick/restore 持久任务调度，把挂起任务周期推进，与 taskLedger 协同。" },
+    "application/subagent": { layer:"编排与业务", role:"子代理成果", desc:"SubagentResults：把 DSH 原生 subagent 的成果交回父会话；定时 sweep，绑定 agent 生命周期。" },
+    "application/turn-scope": { layer:"编排与业务", role:"回合作用域", desc:"installTurnScopeHooks：把记忆收尾权交给“回合真正结束”而非“桥接不再等待”，修复“agent 想久了调不动工具”。" },
+
+    "agent/runner": { layer:"Agent 集成", role:"驱动模型", desc:"runTurn：驱动 DSH Agent 跑一轮（含工具循环、逐步回调）。是桥接与宿主模型推理的交界。" },
+    "agent/tool-scope": { layer:"Agent 集成", role:"工具作用域", desc:"tool-scope：导出给 Agent 的工具作用域（如 qq_say 即时进度工具）。" },
+    "agent/tool-binding": { layer:"Agent 集成", role:"来源归属", desc:"bindToolSource：pre-execute 瀑布里注入 source_ref，把每条工具调用归属到会话/来源（模型不感知）。" },
+    "agent/tool-sets": { layer:"Agent 集成", role:"工具集装配", desc:"tool-sets：装配可用工具集，结合 qq-mcp 提供的 QQ 工具与本地桥接工具。" },
+    "agent/execution-scope": { layer:"Agent 集成", role:"跨会话守卫", desc:"executionToolGuard / active-conversation：保证同一时刻只对一个会话发工具；发布/关闭 execution source 与 turn session，供 qq_say 校验。" },
+    "agent/workspace": { layer:"Agent 集成", role:"工作区根", desc:"workspaceRoot：解析桥接工作区根目录（WORKSPACE_STATE_KEY），写库供工具读取。" },
+    "agent/aux": { layer:"Agent 集成", role:"辅助能力", desc:"aux-*：aux-attribution（来源归属）、aux-model（备用模型）、backoff（退避）、cancellation（取消）、context-overflow（超窗）、file-progress（文件进度）、image-catalog（图片目录）、json-output（JSON 输出）、replay（幂等重放）。" },
+
+    "prompt/prepare": { layer:"提示词", role:"组装", desc:"buildPromptContent：把人设、记忆、窗口、示例、协议聚合成最终提交给模型的提示词内容。" },
+    "prompt/render": { layer:"提示词", role:"渲染", desc:"buildMemoryInjection / buildWindowSection：渲染记忆块与窗口片段，处理去重与顺序。" },
+    "prompt/protocol": { layer:"提示词", role:"协议说明", desc:"protocol：把桥接协议/规则写进提示词（如气泡节奏、@写法）。" },
+    "prompt/examples": { layer:"提示词", role:"示例", desc:"planExamples：规划并注入 few-shot 示例（exampleHashes 去重，避免重复注入）。" },
+    "prompt/forward": { layer:"提示词", role:"转发", desc:"forward：处理合并转发消息，展开为可读文本。" },
+    "prompt/quote": { layer:"提示词", role:"引用", desc:"quote：处理引用回复的渲染。" },
+    "prompt/text-sources": { layer:"提示词", role:"文本/表情源", desc:"text-sources：加载表情目录等文本源（loadStickerCatalog），供渲染与表情选择。" },
+    "prompt/voice-intent": { layer:"提示词", role:"语音意图", desc:"voice-intent：把语音意图标注进提示词，指导模型如何处理语音内容。" },
+
+    "memory/memory-store": { layer:"记忆", role:"存储", desc:"MemoryStore：记忆目录管理、记事本投影（notebook projection）同步 self/memory，启动时自愈重建。" },
+    "memory/episodes": { layer:"记忆", role:"情景记忆", desc:"EpisodeLedger：按会话的情景记忆（episodic），记录“发生了什么”，撤回时 retract。" },
+    "memory/facts": { layer:"记忆", role:"事实记忆", desc:"Facts：可证伪的事实记忆，区分于情景；提供 retract/查询。" },
+    "memory/extractor": { layer:"记忆", role:"事实提炼", desc:"MemoryExtractor：从对话中自动提炼事实（memoryAutoExtract），定时 flush，与聊天解耦。" },
+    "memory/reflect": { layer:"记忆", role:"L4 反思", desc:"MemoryReflector：从已有事实归纳可证伪的行为规律，写进 memory/<qq>.md 的“规律”段；落盘待人确认，不进提示词。" },
+    "memory/agent-memory": { layer:"记忆", role:"agent 接口", desc:"agent-memory：agent 侧记忆读写接口。" },
+    "memory/presentation": { layer:"记忆", role:"渲染", desc:"presentation：memoryBlocks 去重、预算控制、渲染顺序，决定记忆如何进入提示词。" },
+    "memory/flush": { layer:"记忆", role:"刷写", desc:"flush：回合收尾时刷写记忆；与 execution-scope 共享 memoryFlushSessions 集合，收尾时禁发消息。" },
+    "memory/tool": { layer:"记忆", role:"内存工具", desc:"memoryTool：暴露给模型的内存工具（读写记忆/记事本），register 进 Agent 工具集。" },
+
+    "delivery/reply-delivery": { layer:"投递", role:"拆气泡", desc:"queueReply：把模型结果拆气泡、解析 @、处理表情包（按身份键取 URL）、去重已发气泡、处理 [SKIP] 与图片幻觉；最终交给发送队列。" },
+    "delivery/send-queue": { layer:"投递", role:"发送队列", desc:"ConversationSendQueue：插件级跨会话共用队列，记住每会话上次发送时间，保序、跨会话轮转、气泡节奏（bubbleDelayPerCharMs）模拟打字。" },
+    "delivery/outbox": { layer:"投递", role:"幂等发送", desc:"sendOnebotIdempotent：带 idemKey 的幂等发送（sticker/文字），同一键不重复发；写回执。" },
+    "delivery/reply-journal": { layer:"投递", role:"回复账本", desc:"replyJournal：追踪每条回复的状态（following/output/delivered），按 rpcId/inbox 消费确认归属；跨重启恢复未投递项。" },
+
+    "store/sqlite": { layer:"持久化", role:"主库", desc:"qq-bridge.sqlite3：会话状态、事件表（inbound/self_message + acked）、缺口 gap、reply 账本、自传表、runtime_state（active-conversation、跨会话开关、托管开关）。所有跨进程/跨重启状态的唯一真相源。" },
+    "store/memory-dir": { layer:"持久化", role:"记忆目录", desc:"data/memory：记事本/记忆投影 *.md 文件，memory-store 同步维护，启动时重建。" },
+    "store/files": { layer:"持久化", role:"其它文件", desc:"data/ 下的登录告警文件、日志等，与库同目录避免“库在 A 文件在 B”。" },
+    "config": { layer:"持久化", role:"配置", desc:"config.mjs：profile 配置（群/私聊开关、白名单、awakeMs、心跳、记忆、表情目录、stateDir 等）；assertConfig 校验。" }
+  };
+
+  const titleEl = document.getElementById('info-title');
+  const metaEl = document.getElementById('info-meta');
+  const descEl = document.getElementById('info-desc');
+  const roleEl = document.getElementById('info-role');
+
+  document.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const key = chip.dataset.key;
+      const d = DATA[key];
+      document.querySelectorAll('.chip.active').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      if (d) {
+        titleEl.textContent = key;
+        metaEl.textContent = '所属层：' + d.layer;
+        descEl.classList.remove('empty');
+        descEl.textContent = d.desc;
+        roleEl.textContent = '职责：' + d.role;
+      } else {
+        titleEl.textContent = key;
+        metaEl.textContent = '所属层：外部 / 横切';
+        descEl.classList.remove('empty');
+        descEl.textContent = '（见对应说明卡片）';
+        roleEl.textContent = '';
+      }
+    });
+  });
+</script>
+</body>
+</html>

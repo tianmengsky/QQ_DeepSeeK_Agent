@@ -628,7 +628,7 @@ console.log("\n[13] 回复形态模板（抽签）");
   check("签说配图时给出明确指令", p2.includes("这条要配 1 张表情包"), true);
   check("签说配图时说明写哪里", p2.includes("写在最后一个气泡的『』里"), true);
   check("静态块里给了标记写法", p2.includes("[表情:"), true);
-  check("气泡想分几条就分几条", p2.includes("想分几条就分几条"), true);
+  check("静态块不再授权无限拆泡", p2.includes("想分几条就分几条"), false);
   check("每轮注入碎句短句的软偏好", p2.includes("偏向碎句、短句、口语"), true);
 
   const p3 = buildPrompt(ev, c, {

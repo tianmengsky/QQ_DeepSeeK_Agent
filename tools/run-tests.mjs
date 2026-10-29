@@ -18,6 +18,7 @@ const suites = [
   'events',
   'voice-transcription',
   'voice-intent',
+  'voice-library',
   'history-context',
   'history-timeout',
   'context-time',
@@ -51,6 +52,9 @@ const suites = [
   'aux-health',
   'json-output',
   'recovery-guard',
+  'panel',
+  'admin',
+  'bili-ingress',
 ];
 /**
  * 两项实测最慢，占全量七成以上时间，原因都是"在等真实时间"：

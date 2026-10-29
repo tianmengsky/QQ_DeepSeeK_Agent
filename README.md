@@ -1,4 +1,49 @@
-# dsh-qq-bridge
+2026-10-29 版本号 `v103-voice-unthrottled` → **`v104-bubble-band`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示）。同一批装了两件事：气泡软带上限，和下面的【认事不认人】（都只改提示词，桥接一行没动）。
+
+**同一批的另一半：【认事不认人】。** 用户说"她老用'我认'这个 AI 高频词"。先取证再改：`docs/reports/_count-yiren.mjs`（只读打开 `data/qq-bridge.sqlite3`）把出站存档拆成气泡后统计——2052 条回复、41577 个气泡文本里含"认"字的 **42 条**，其中裸判决（前面没说是哪件事，只剩「我认」）**2 条**、认事（「X，我认」）**28 条**、别的认字词（认得/认栽/认领/认亲/认输）**12 条**；但这 30 条里有 **19 条挤在 10-26～10-29**（10-28 单日 10 条，全在秦制那场辩论）。结论：词本身没泛滥，是最近四天把「X，我认」当成了句尾收尾套路。根因也在提示词里——`persona.md:18` "对方一认真，你立刻收住认栽"、`:45` "偶尔认输也很可爱"、`behavior.md:12/37/97` 的"认栽""主动滑跪"，加上 `protocol.mjs:80` 与 `text-sources.mjs:106` 把"认输"列进要配表情的情绪清单：规则反复要求"认"这个动作，风格又要求 1~10 字短反应，最短可执行形态就是「我认」。改法是**把"认"指回具体那件事，并换掉句子的形状**（不写词表、不靠"别用某个词"）：`render.mjs` 每轮新增【认事不认人】——让步放在句子中间或开头、**不许拿它收尾**（"不写独立成句的『这条我认』那种宣告"），示范为正例（『刚才那条是我记串了，失期不是皆斩，我再看下律条』），配一句替代动作（不想解释就只认"是我记错了"或直接接下一句）、频次（"同一场聊天里让步一次就够"）和反向护栏（"认事是加分不是认输——别为了避开这个说法就硬撑着不认"，防止从"爱认"荡到"死嘴硬"）。为什么是位置约束而不是词表：模型给的是"让步"这个语义，不是那两个字；点名词只会让它在候选里更活跃，而约束位置 + 给足正例才是可执行的动作。另外在 `examples.md` 加了第 20 条 few-shot（`id:conceded`，场景"争论里被举出具体反例"，示范"……好吧 那条是我记串了 失期不是皆斩"＋"硬气归硬气 错了就是错了嘛"）——对抗模型先验最有效的是示范，不是禁令，而原来 examples 里根本没有"被说服后让步"这一档。`persona.md:18/:45`、`behavior.md:12/:37/:97`、`examples.md` 的 prefer/learn 把"认栽/认输"换成"收住/认那件事/让一步/认下这一句"，`protocol.mjs:80` 与 `text-sources.mjs:106` 删掉"认输"。验证：`node tools/run-tests.mjs logic memory-context` **239 项通过、0 失败**。桥接此刻没在跑（2112 不监听），所以**等下次重载生效**，未做在线验证。
+
+用户的抱怨是"她发言连珠炮"。查下来不是"上限被删"一个原因，而是四层文案在互相打架、而且都在催多：`protocol.mjs` 静态协议第一眼就是"想分几条就分几条"；静态示范只给了三个碎句（示范变成目标）；`render.mjs` 每轮的【手感·软偏好】写着"话多时多发几条短的"（全仓库唯一一句直接命令"多"的话）；`persona.md` 写着"默认一句话 1~10 字""一条气泡表达一个小反应""**由桥接控制最多气泡数**"（这句在 v98 就已失效，模型读到的是"桥接会替我收尾"，于是敢拆）和"想到补充时再发下一句"。
+
+10-27 的拍板是把气泡上限整条拆掉（`maxBubbles` 废弃、`splitBubbles` 不封顶），这次是**有限回摆**：不加任何机械闸，只用提示词给一个软带上限。
+
+改动全在提示词：
+① `render.mjs` 每轮【这条怎么发】删掉"想分几条就分几条"，改成"一条说得完就发一条——通常 1–3 条，2–3 条最常见，4 条是天花板"；新增【气泡数】**"数字是上限不是配额"**，给出可执行动作（"发之前数一遍『』：超过 3 条就把最像的两条并成一条"）、改口不重发，以及物理后果（"每条『』都是群里一次新消息、对方手机响一次"）。
+② 同一段【手感·软偏好】把"碎"从气泡**之间**挪到气泡**之内**："碎句并进同一条气泡里连着说，一条 10–25 字装两三个短句；停顿放句内"。这条顺带解决节奏：间距是"下一条字数 × 100ms"（下限 400ms），3 字气泡只等 400ms 才是真正的连珠炮，15 字气泡等 1.5 秒就像打字——不碰任何配置也能拿到节奏。
+③ `protocol.mjs` 的"想分几条就分几条"改成"一条说得完就发一条，通常 1–3 条，4 条是上限；数字是上限不是配额，不凑数"，示范改成"一条够用时『这啥』；需要分成几段时最多三四个气泡……"（先给单条的示范）。`PROMPT_REVISION` → `v104-bubble-band`。
+④ `persona.md` 四处对齐：`persona.md:39` 允许单气泡装两三个短句、"停顿放在句内，不靠换气泡断句"；`persona.md:56` 删掉失效的"由桥接控制最多气泡数"，改成"通常 1~3 条，最多 4 条"；`persona.md:80` 改成"想到补充时并进同一条"；`persona.md:81` 删掉"每条保持小碎片"。
+
+验证：**本次没能跑测试**——本机 `pwsh` 每次启动都是 `exit 3221225794`（`0xC0000142 STATUS_DLL_INIT_FAILED`），`node tools/run-tests.mjs` 起不来。这版只改提示词字面量与一条测试断言（`test/logic.test.mjs:631` 原来钉"想分几条就分几条"在场，改成钉它**不在场**），不碰投递逻辑；`logic` / `memory-context` 两套等 shell 恢复后补跑。在线 build 等下次插件重载生效，重载后 `/status` 的 `build` 才是 `v104-bubble-band`。
+
+2026-10-28 版本号 `v102-voice-library` → **`v103-voice-unthrottled`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示）。
+
+一次验收暴露的问题：语音库能发，但发不出去——条目里被我写了 `cooldownSeconds: 1800`，第一次点歌就被"语音「雨爱(司凤版)」冷却（已用 1/1）"挡回来。用户的原话是"取消所有语音限流闸，每小时10条也不是我要求的"。
+
+这一版把语音的闸**全部拆掉**：
+
+- `qq-mcp` 的 `QUOTA.voicePerHour` 默认从 10 改成 **0（不限）**；`qq_send_voice` 只在它 > 0 时才挂小时桶，`qq_send_ai_voice` 同样受这条控制——要收就显式设 `QQ_QUOTA_VOICE_PER_HOUR=N`。
+- **单曲冷却机制整条删除**：`sendVoiceClip` 不再生成 `mcp:voice:clip:<id>` 桶，`lib/agent/voice-library.mjs` 不再读 `cooldownSeconds`（旧清单里写着也直接忽略），`tools/seed-voice-library.mjs` 去掉 `--cooldown`。
+- 保留的是**安全边界**不是配额：路径越界/符号链接逃逸、>20 MiB、>300 秒、`sha256` 不符、名字歧义、能力位、幂等，以及所有发送共用的每分钟间隔。
+- 生产状态里已消费的 `mcp:voice:*` 计数（含那条冷却 1/1 和群 2165079787 的小时桶）已清空，所以不用等窗口重置就能重试。
+
+验证：`voice-library` 8 项、`mcp` 84 项（"连发两条都要放行"替换了原来的冷却断言）、`logic` 197 项全过。**注意**：`qq-mcp` 是 DSH 启动时拉起的子进程，小时闸默认值要下次重启才生效；在那之前运行中的进程仍是 10 条/小时（计数已清零，够验收）。
+
+2026-10-28 版本号 `v101-bili-passive-wake` → **`v102-voice-library`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示）。
+
+问题是一次用户验收：在群里说"唱一下雨爱司凤版"，她要么回"我唱不了"，要么把它当文件发 mp3。根因是两个洞：①根本没有"把一段音频当语音发"的工具，`qq_send_file` 只能发文件卡片；②她也**不知道自己有这段音频**——`detectVoiceIntent` 只认"发语音/念给我听"，"唱一下"不命中，静态卡又是每窗口只注入一次，而点歌随时发生。
+
+这一版装进去的是：
+① **语音库**（`lib/agent/voice-library.mjs`）：`~/.dsh/qq-voices`（配置 `voiceLibraryRoot` / 环境变量 `QQ_VOICE_LIBRARY` 可覆盖）里 `index.json` + `clips/`。**故意不放会话工作区**——工作区按会话隔离、压着 200 文件 / 50 MiB 配额，`.outgoing` 快照又只增不减，一首歌塞进去早晚把某个群的文件槽占满；库文件由 SnowLuma 直接读本机路径（`loadPtt` → `encodeSilk`），不进工作区、不占快照。
+② **`qq_send_voice`**：`name` 匹配库条目（id / 名字 / 关键词，歧义直接报候选），发 `record` 段；**`qq_voice_library`** 让她在清单被截断时自己复查。能力位沿用 `send_voice`，**只授 `send_sticker` 的旧配置也认**，所以现有部署不改 env 就能用。
+③ **边界全在发送前**：路径越界（含符号链接逃逸）、>20 MiB、已知时长 >300 秒、`sha256` 不符、名字歧义，全部拒绝——它挡在 SnowLuma 直接读本机路径之前。**语音不限流**：没有小时闸、没有单曲冷却（`QQ_QUOTA_VOICE_PER_HOUR` 默认 0，设了才收），因为点歌是低频动作，多一道闸只会让"答应了却发不出去"。
+④ **她怎么知道自己能唱**：每轮把库清单（名字 / 时长 / 用途，**不含路径**）作为【你能直接放语音】注入 per-turn rules；`protocol.mjs` 【念与语音】改成"要唱先看语音库，别用 `qq_send_file` 发 mp3"。
+⑤ **顺手封旁路**：`qq_send_group_msg` / `qq_send_private_msg` 现在和 `file` 段一样拦 `record` 段——否则能力位、路径/时长校验、记账全能被一句 CQ 码绕过。
+⑥ 运维脚本 `tools/seed-voice-library.mjs`：`add` / `list` / `remove`，自带 mp3 逐帧时长解析（不依赖 ffmpeg），自动算 sha256、复制进 `clips/`。
+
+验证：`voice-library` 新套件 8 项、`mcp` 84 项（新增"发库内音频→record 段 + `[语音：…]` 记账 + 唤醒窗口 + 幂等重放"与"列表/能力位/歧义/越界/冷却/record 旁路"）、`--fast` 顶层各套件全过。**唯一失败是既有 `lifecycle` 套件**（临时目录清理 `EPERM`，`untilChecked` 断言 0 !== 1；stash 全部改动后在 HEAD 上同样失败，与本版无关）。真实库已登记 `yuai-sifeng`（`雨爱(司凤版)`，140.1 秒，sha256 `707d88af…f202d9`），并用 `QQ_DRY_RUN=1` 对真实 140 秒 mp3 跑通 `qq_send_voice`（工具可见、清单正确、路径与时长校验通过）。**验收待重启 desktop profile 后**：MCP 子进程是 DSH 启动时拉起的，新工具要重载才可见；随后在群 2165079787 自然说一句"唱一下雨爱司凤版"看是否落到语音气泡。
+
+2026-10-28 版本号 `v100-bili-replies` → **`v101-bili-passive-wake`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示）。B站私信事件不再等待普通 QQ 输入防抖，收到后立即激活 `bili:<uid>` 回合；B站发送成功继续复用 `recordSpeech/wakeAfterSpeech` 的清醒窗口。刷视频 duty 在 `perDay=0`、谷时关闭时不创建空转定时器，仅保留发现私信所需的低频轮询。已补充唤醒窗口断言；安装版插件与桥接在线重载仍需 desktop profile 重启后确认。（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示）。B站私信不再停留在仅入站：agent 按现有『』协议生成普通气泡后，bridge 复用 `dsh-bili-scroll` 内部 MCP 客户端调用原生 `bili_send_message`，逐气泡发回来源 UID；agent 不需要自行调用工具。插件重验 `dmWatch` 与关注 UID 白名单；发送走 bridge outbox 幂等键并要求原生 `msg_key` 回执，结果未知时不自动重发。B站 session 仍禁止 agent 直接调用任意 QQ/B站外发工具，且不写入 QQ 人物记忆。定向 `bili-ingress deliver send-queue store reliability tool-scope` 共 84 项通过；`--fast` 918 项通过，另有既有 `lifecycle` 测试因临时目录清理 `EPERM` 失败（`untilChecked` 断言 0 !== 1）。安装版插件与桥接在线重载及真实 B站回复验收待 desktop profile 重启后进行。
+
+2026-10-28 版本号 `v98-brackets-pacing-dedupe` → **`v99-bili-ingress`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示）。将 `dsh-bili-scroll` 的关注对象私信接入 bridge 内部事件 `qq-bridge:external-message`，在独立 `bili:<uid>` 会话中走正常聚合与 DSH 回合；HTTP OneBot 请求会剥除伪造来源标记。B站入站回合禁止 QQ/B站发送工具，不会默认向任何渠道回复。watcher 按序提交未读私信，仅在 bridge 接收后推进游标。新增 `bili-ingress` 行为套件，覆盖来源校验、隔离会话、SQLite 去重、防伪与禁发工具。定向 15 项通过；`--fast` 为 918 项通过，既有 `lifecycle` 套件仍失败（临时目录清理 EPERM，`untilChecked` 断言 0 !== 1）。本机 2112 未监听，线上状态待服务重载确认。
 
 2026-10-28 版本号 `v97-dsh-only-replies` → **`v98-brackets-pacing-dedupe`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示的就是它）。用户问「有多久没有更新版本号了，现在还是 v97？是不是该更新了」——查下来确实只有 2026-10-19 初始化那次写过，之后 9 天又落了 11 个提交（10-22 一个、10-27 八个、10-28 两个）一次没动。
 
@@ -601,6 +646,7 @@ DSH 原生 `subagent` 一组（`subagent`/`subagent_fork`/`list_agents`/`send_me
 | `qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face` | 读**账号收藏表情**（真正在用的那条链路）；`qq_custom_face_sheet` 把上百张拼成一张带编号的总览图，**一眼看全、只算一张图的成本** |
 | `qq_send_mface` | 发 QQ 原生动画表情（收藏表情只能拿到静态首帧，要动图得走这个） |
 | `qq_send_ai_voice` | 用 **QQ 自带的 AI 语音**把文字念成语音发到群里（不依赖本地 TTS、不需显卡）；音色固定「傲娇少女」，没有挑选接口 |
+| `qq_send_voice` / `qq_voice_library` | 把**语音库里一段现成音频**当语音气泡发出去（点歌、哼一段），以及查看库里有哪几条；库在 `~/.dsh/qq-voices`，见「语音库」一节 |
 | `qq_collect_sticker` / `qq_list_library_stickers` / `qq_view_library_sticker` / `qq_send_library_sticker` | 内容寻址图库：收藏时记下"这张是什么情绪、什么时候用"，之后按情绪挑 |
 | `qq_reliability_status` | 查发送回执和**结果未知、需要人工核对**的发送 |
 | `qq_delete_msg` | 撤回自己发的消息 |
@@ -1086,17 +1132,66 @@ open-panel.bat -NoOpen         只打印地址
 |---|---|
 | 顶部判定条 | `lib/panel/verdicts.mjs` 纯函数（零依赖，node 单测和浏览器跑同一份源码），红 > 黄 > 灰排序，每条带「看明细 →」跳到对应 tab |
 | 会话表 | `awake` + `heartbeat.groups` 拼的，默认只列 24h 内有动静或清醒中的，勾「显示全部」看全量 |
-| 任务 / 投递 / 失败面 | `tasks`、`replyDelivery`、`reliability` + `stats.recovery` |
+| 任务 / 投递 | `tasks`（含排队输入与活跃执行）、`replyDelivery` 的待送达与最近失败 |
+| 失败面 | `reliability` + `stats.recovery` + `stats.lastError`，底部是处置记录 |
+| 设置 | `lib/admin/spec.mjs` 白名单 + `GET/POST /qq/onebot/admin/*` |
+| 记忆 | `memory/` 目录（`diary.md`、人物卡、`groups/`） |
 | 最近一次 | 最后一个回合、prompt 组成、登录、出站队列、辅助层 |
 | 原始 JSON | 折叠在底部，接口原样，没美化 |
 
-只读，唯一的写入口是右上角的托管开关（走 `POST /qq/onebot/control`，`confirm` 一次才发）。`?tab=delivery` / `?tab=failures` 可以直接落到某个 tab。
+右上角的托管开关走 `POST /qq/onebot/control`（`confirm` 一次才发）。`?tab=delivery` / `?tab=failures` / `?tab=settings` / `?tab=memory` 可以直接落到某个 tab。
 
 外观是国风卡通平面（宣纸底、墨线描边、硬投影无模糊，配色取自参考项目：朱砂 `#C44E3A` / 古金 `#D4A84B` / 石绿 `#5B8C5A` / 青金 `#26619C`）。两套主题全在 `:root[data-theme=day]` 与 `:root[data-theme=night]` 的 CSS 变量里：右上角「昼/夜」按钮切换、记在 `localStorage`（`qq-panel-theme`），没选过就跟系统 `prefers-color-scheme`；`?theme=day` / `?theme=night` 可强制某一套（截图、临时看夜间都方便）。首帧由 `<head>` 里的一小段内联脚本决定，不会白闪。
 
 鉴权跟 `/control` 同一套：`token` 配了就必须带 `?token=...`（页面把 token 放进 `Authorization` 头，不写进 HTML）；没配就直接能打开。页面 30 秒轮询一次，标签页隐藏时停。
 
 改 `lib/panel/shell.html` / `lib/panel/app.js` 后**刷新页面**就生效（面板按 mtime 重新拼页，不必重载插件）；`node tools/run-tests.mjs panel` 是它的套件。
+
+#### 设置 tab：改完立即生效，但不写 DSH 的配置文件
+
+能改的东西是**白名单**：`lib/admin/spec.mjs` 里那 26 项（人设/规矩/示例三份文本、注入层级、上下文轮数与字符预算、主/aux provider 与模型、心跳五个参数）。清单外的一律拒——这些键是"改了知道会发生什么"的，其余一百多个继续走 DSH 设置页。
+
+值不写进 `~/.dsh/profiles/desktop/cordis.patch.yml`，而是落到 `data/panel-settings.json`，同时就地改运行中的 `config` 对象：
+
+- **为什么**：DSH 自己也会写那份 YAML（还留 undo 快照），两个写者抢同一份文件，写坏一次插件就起不来。
+- **代价**：DSH 设置页看不到这里的覆盖值；好处是覆盖层不动原文件，重载时 `createAdmin()` 在服务构造之前把覆盖值重新盖上去，所以**重启也还是你改的值**。
+- 「恢复默认」= 写回插件启动时拍的基线（也就是 YAML 里那个值），不是"清空成 0"。
+- 每次改动进 `history`（上限 100 条，带备注），面板底部「最近改动」就是它。
+
+生效时机：
+
+| 改什么 | 什么时候生效 |
+|---|---|
+| 人设 / 规矩 / 示例 | 下一轮（`resolveTextField` 按 mtime 重读，不用重载） |
+| 注入开关、轮数、字符预算 | 下一轮（`execute-turn` / `context` 每轮读 config） |
+| 主 / aux 模型 | 下一条会话新建时；已存在的会话不变 |
+| 心跳参数 | 下一个判断周期 |
+
+#### 记忆 tab：日记、人物卡、群记录
+
+`memory/` 下每个 `.md` 都能浏览和手改，列表用文件第一行的标题（`# 天梦·幻（QQ 1056612947）`）而不是裸 uin。写之前先把旧版备份到 `data/panel-backups/`，原子替换。路径只认 `memory/` 之内的 `.md`：`..`、绝对路径、`.txt` 一律拒——面板可能被代理到别处，这条边界必须写死。
+
+顺带一提：`diary.md` 是桥接从 SQLite 投影生成的，**手改会被下一次同步覆盖**。要在日记里留东西，让 agent 走 `qq_memory`（scope=self）。
+
+#### 处置：面板上直接把卡住的东西结掉
+
+看见红的之后，原先是"知道哪坏了，然后开命令行"。现在每个出问题的行都带按钮，走同一条后端通道 `POST /qq/onebot/admin/action`（清单：`GET /qq/onebot/admin/actions`）：
+
+| 动作 | 出现在哪 | 干什么 |
+|---|---|---|
+| `receipt.markSent` / `receipt.markFailed` | 失败面「待核对回执」每一行 | 人工核对 UNKNOWN 回执后把它定成"真发出去了/确实没发"，别让它一直占着待核对列表 |
+| `delivery.retry` / `delivery.abandon` | 投递 tab「待送达」每一行 | 重排一次（`retryAt` 设为现在）或彻底放弃（`state='failed'`，详情写"已放弃恢复"） |
+| `task.settle` | 任务 tab「活跃任务」每一行 | 把卡住的执行判死（`failed` + `panelNote`）。**只判死，不谎报 done** |
+| `queue.flush` | 判定条「队列在途」 | 立刻催一次出站队列，把在途时间清掉 |
+| `conversation.reset` | 代码调用 / 后续会话页 | 清掉某个会话的上下文与窗口（危险动作，要 `confirm: true`） |
+| `heartbeat.poke` | 设置页心跳现状表每一行 | 跳过冷却，立刻判一次"这个群该不该插话" |
+
+几条写死的规矩：
+
+- **危险动作要 `confirm: true`**。面板会先弹 `window.confirm`，但后端不认"前端弹过了"——没有这个字段一律 400。这样误发的 curl、脚本、跨站请求都过不去。
+- **`idemKey` 幂等**：同一次点击重发不会执行两遍，返回 `replay: true`。
+- **写审计**：每条（成功、失败、参数校验不过）都追加到 `data/panel-audit.jsonl`，面板「处置记录」读它——所以 HMR 重载插件后，刚才点了什么、成没成，还在。
+- 动作层是 `lib/admin/actions.mjs` 里的一张 `ACTIONS` 表，加动作 = 加一条登记 + 一个 handler，路由不用动。
 
 登录与启动：`start-qq-mcp.bat` 默认使用 SnowLuma，自动启动接入端并按已登录机器人号选择注入，不强杀 QQ；`restart` 只重置桥接托管。DSH/桥接与 MCP stdio 进程仍由 DSH 管理。普通 QQ 的扫码/账号登录需用户完成。判断就绪必须确认 OneBot 账号正确、`online=true`，并拒绝 `good=false`，端口打开不等于在线。
 
@@ -1351,6 +1446,7 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 | `onebotToken` | 空 | 与 SnowLuma HTTP server 的 `accessToken` 一致 |
 | `cwd` | 空 | 旧数据目录基准；会话 cwd 由独立工作区管理 |
 | `workspaceRoot` | 空 | 工作区根目录；默认用户目录下 .dsh/qq-workspaces，按群/私聊隔离 |
+| `voiceLibraryRoot` | 空 | 语音库根目录；默认用户目录下 .dsh/qq-voices，也可用环境变量 `QQ_VOICE_LIBRARY`。与工作区**刻意分开**：库文件由 SnowLuma 直接读本机路径，不占会话配额 |
 | `agentPreset` | 空 | 指定 QQ 会话使用的 Agent 预设 |
 | `groups` | `[]` | 群白名单，空=不限制 |
 | `users` | `[]` | 用户白名单，空=不限制 |
@@ -1830,6 +1926,43 @@ QQ 内置表情不需要图片文件，直接用 `face` 段按 ID 发即可：
   成功后往桥接窗口记一条 `[语音：…]` 并刷新 60 秒唤醒窗口，下一轮它知道自己用语音说过什么。
 - 形态：不走 `send_group_msg`，所以不能和文字/图片拼成一条消息；一次一个语音气泡。
 
+### ④ 语音库（`qq_send_voice` / `qq_voice_library`）
+
+上面 ③ 是"把文字念出来"，这一条是"把一段现成的音频放出来"：点歌、让你哼一段、想听你唱，
+模型从部署方的语音库里挑一条发出去，QQ 里就是**语音气泡**，不是文件卡片。
+
+- 库在哪：`~/.dsh/qq-voices`，部署方可用配置 `voiceLibraryRoot` 或环境变量 `QQ_VOICE_LIBRARY` 覆盖。
+  **不放会话工作区**：工作区按会话隔离、还压着 200 文件 / 50 MiB 配额，
+  且 `.outgoing` 快照只增不减，把歌曲塞进去早晚把某个群的文件槽占满。
+  库文件由 SnowLuma 直接按本机路径读取（`loadPtt` → `encodeSilk`，非 SILK 自动转 NT SILK），
+  所以不进工作区、也不占发送快照的配额。
+- 库长什么样：`<root>/index.json` + `clips/`。
+  ```json
+  { "clips": [
+    { "id": "yuai-sifeng", "label": "雨爱(司凤版)", "file": "clips/yuai-sifeng.mp3",
+      "spoken": "唱了一段《雨爱》（司凤版）", "description": "整首 2 分 20 秒，点歌时用",
+      "tags": ["唱歌", "雨爱"], "durationMs": 140147 }
+  ] }
+  ```
+  `spoken` 是发给模型自己看的"我刚才唱了什么"：语音不入库转写（入站转写只处理别人发的），
+  没有它，下一轮它就不知道上一轮放了哪首。
+- 怎么入库：`node tools/seed-voice-library.mjs add public\雨爱(司凤版).mp3 --label 雨爱(司凤版) --spoken …`。
+  脚本自带 mp3 时长解析（不依赖 ffmpeg），会算 sha256、复制进 `clips/`；`list` / `remove` 同一套。
+  `--split 3` 需要本机有 `ffmpeg`，按 `-c copy` 切成若干段。
+- 边界（都在 `lib/agent/voice-library.mjs`，发送前拦）：路径不得越出库根（含符号链接逃逸）、
+  单文件 ≤ 20 MiB、已知时长 ≤ 300 秒、清单写了 `sha256` 就必须一模一样、
+  名字有歧义直接报候选而不是猜。全是拒绝语义 —— 它挡在 SnowLuma 直接读本机路径之前。
+- 配额：**语音不限流**。不走小时闸、也没有单曲冷却：`QQ_QUOTA_VOICE_PER_HOUR` 默认 `0`（=不限），
+  显式设成正数才会收；清单里写 `cooldownSeconds` 也早已不生效（读的时候直接忽略）。
+  仍保留的是安全边界（路径/大小/时长/sha256/能力位）和全体发送的分钟间隔。
+- 记账：成功往窗口记 `[语音：<label>] <spoken>` 并刷新 60 秒唤醒窗口。
+- 她怎么知道自己能唱：`lib/prompt/render.mjs` 每轮把库清单（名字 / 时长 / 用途，**不带路径**）
+  作为【你能直接放语音】注入。不能靠 `detectVoiceIntent` —— 它只认"发语音 / 念给我听"，
+  "唱一下雨爱"不命中；也不能靠静态卡，静态卡每窗口只注入一次而点歌随时发生。
+- 旁路已封：`qq_send_group_msg` / `qq_send_private_msg` 现在和 `file` 段一样拦 `record` 段，
+  否则能力位、小时闸、冷却和记账全都能被一句 CQ 码绕过去。
+  要发语音只有两条正路：`qq_send_ai_voice`（念文字）或 `qq_send_voice`（库里的一段）。
+
 **收藏表情无法程序化列举**：OneBot v11 没有"列出收藏表情"的标准接口，
 且收藏主体在腾讯服务端、本地 `personal_emoji` 目录未必存在。
 上面 ① 能工作是因为 SnowLuma 实现了 `fetch_custom_face` 这个扩展 ——
@@ -1935,7 +2068,7 @@ QQ_CAPABILITIES=send_text,send_sticker,read_favorites
 |---|---|
 | `send_text` | `qq_send_group_msg` / `qq_send_private_msg` |
 | `send_sticker` | `qq_send_sticker` / `qq_send_custom_face` / `qq_send_mface` / `qq_send_library_sticker` |
-| `send_voice` | `qq_send_ai_voice`（QQ 内置 AI 语音）。**只授了 `send_sticker` 的旧配置也认**，想单独收回语音就把两个都去掉 |
+| `send_voice` | `qq_send_ai_voice`（QQ 内置 AI 语音）与 `qq_send_voice`（语音库里的一段音频）。**只授了 `send_sticker` 的旧配置也认**，想单独收回语音就把两个都去掉 |
 | `read_favorites` | `qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face` |
 | `read_image` | `qq_read_image` / `qq_collect_sticker` / `qq_view_library_sticker`；配合 `read_forward` 读取转发图片 |
 | `manage_group` | `qq_delete_msg`、`qq_manage_group`（禁言/踢人/改名/改名片/发·删公告） |
