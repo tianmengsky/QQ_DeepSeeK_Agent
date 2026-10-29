@@ -7,6 +7,7 @@
  *   node tools/prompt-probe.mjs --probe P1                    # 当前提示词
  *   node tools/prompt-probe.mjs --probe P1 --rules extra.txt   # 每轮层追加（模拟 rules 改动）
  *   node tools/prompt-probe.mjs --probe P1 --static extra.txt  # 人设层追加（模拟 persona 改动）
+ *   node tools/prompt-probe.mjs --probe P1 --persona alt.md    # 换一份 persona（模拟人设改写）
  *   node tools/prompt-probe.mjs --all --rules extra.txt
  */
 import fs from 'node:fs';
@@ -98,7 +99,7 @@ const probeHistories = {
 };
 
 const config = Config({
-  personaFile: path.join(project, 'persona.md'),
+  personaFile: arg('persona') ? path.resolve(arg('persona')) : path.join(project, 'persona.md'),
   behaviorFile: path.join(project, 'behavior.md'),
   examplesFile: path.join(project, 'examples.md'),
   stickerHints: false,
