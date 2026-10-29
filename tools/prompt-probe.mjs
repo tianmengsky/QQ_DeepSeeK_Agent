@@ -101,7 +101,7 @@ const probeHistories = {
 const config = Config({
   personaFile: arg('persona') ? path.resolve(arg('persona')) : path.join(project, 'persona.md'),
   behaviorFile: path.join(project, 'behavior.md'),
-  examplesFile: path.join(project, 'examples.md'),
+  examplesFile: arg('examples') ? path.resolve(arg('examples')) : path.join(project, 'examples.md'),
   stickerHints: false,
   stickerCatalogPath: '',
   memoryEnabled: true,
