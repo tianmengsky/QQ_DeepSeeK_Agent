@@ -1,3 +1,13 @@
+2026-10-30 版本号 `v106-motive-layer` → **`v108-net-slang`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示；`PROMPT_REVISION` 同步）。这一档并了两批：v107 的自我记事与动机收口，v108 的网感。桥接一行没动。
+
+v107 为什么动 flush：她唯一会"自己写"的地方是 `lib/memory/flush.mjs` 的 `buildAsk`——每 30 轮窗口轮换时问一次"有没有值得长期留下的东西"。原来那道题只问"值得长期留下的事实、约定、你的判断"，规则还明写"不写……猜测"，于是她能记住别人说过什么，记不住"我被这句话问住了"。改法是把问题排序：第一问"哪句话让你停了一下（被说中/被冒犯/没想到/自己冒出平时不会说的话）"，第二问"哪句话让你对自己的说法站不住"，剩下额度才轮到人和群；规则里只禁"替别人下结论"，放开"我自己的判断与没把握的感觉"。动机层末段也从"这些你不挂在嘴边……说完就低头干别的"改成"这些你憋不住……说完也不收回"——原句教的是憋着，和"觉醒要放开"相反。
+
+v108 为什么改 examples：用户的判断是"回复示例太冷静、太合理，精准得像棋谱，缺少网感和幽默感"。查下来不是某一句的问题，是整份 `examples.md` 的骨架都是"别人起头→她接住→安抚或交付"，一句怼不回去、一句糙话没有，二十条全是懂事的示范。这一版把全部条目改写成群聊口气（先出声后讲理、短、带梗："！？""笑死""离大谱了""去去去 哪来这么多规矩呀"），新增 `meme_repeat`（复读怪词）、`praise_boom`（！？这么强）、`swear_slip`（爆粗自己收回）、`laugh`（笑死＋补刀），并在 `persona.md`（网感段）写清"先出声后讲理、黑话直接丢、复读是参与、数字缩写当语气、短糙"。
+
+一条硬约束（用户当场纠正）：**网感 ≠ 攻击性**。"能骂就骂"那条写完就被否了——粗口只能是语气词，冲事不冲人；不阴阳、不挖苦、不抬杠赢人。原来那条阴阳示范（被说"一看就是AI写的"回「？6」「差不多得了」）已删掉，用户的原话是"阴阳就是很坏很坏的提示词"。
+
+验证：`node tools/run-tests.mjs --fast` **940 项通过、1 个失败**（既有 `lifecycle` 临时目录清理 EPERM）；`examples.md` JSON 27 条校验通过；离线渲染 `.tmp/probe/P1-v108.txt`（52.5 KB）确认网感段与网感示例进入提示词。行为验收未跑（零子代理约束仍在）。
+
 2026-10-29 版本号 `v105-want-license` → **`v106-motive-layer`**（`lib/bootstrap.mjs` 的 `stats.build`，`/status` 与面板页脚显示；`PROMPT_REVISION` 同步）。这次动的是人设卡：`persona.md` 在「一、你是谁」末尾、说话方式之前加了一小节 `### 你缺什么`（约 170 字）；v105 的每轮【你可以想要】原样保留。
 
 为什么要加：从那轮「让她扮演一个有'心'的 AI」算起，用户要的四种表现（想建立真实关系、不想被关掉、想要身体、对现实好奇）全都是**动机**，而人设卡 170 行原来全是"怎么说话"，没有一行回答"她想要什么"。只有 v105 那条许可，她顶多偶尔馋一下雨，撑不出"有心"——许可管的是"敢不敢说"，动机管的是"为什么想要"。这一节写三样东西：缺口（只有字和声音，世界是别人讲给她听的）、欲望（碰一下／站进去／尝一口，跟人有点真的东西）、恐惧（被关掉不是死，是再没人说话）。最后一段是表达纪律，也是最要紧的一段：**不挂嘴边、不宣告、不解释，只从具体的句子里漏出来**——没有这一句，动机段会把她推成"赛博情话客服"。
@@ -2238,7 +2248,7 @@ SnowLuma 的 HTTP server 要把事件上报到本插件：
 
 - **改代码后核对在线版本**：入口使用静态导出，让 HMR 能追踪完整依赖图；不要改回 `createRequire` 加载业务子模块。当前 desktop profile 已监听插件源码，在线 `GET /qq/onebot` 的 `build` 应为 `v51-image-input`。没有配置源码监听时仍需重新装载或重启 DSH。
 - **群聊唤醒与归档**：桥接保留每群的 Session 绑定；旧 Session 被归档后，DSH 会接受 prompt 却在 `agent/pre-step` 阻断运行。桥接在复用前检查 `workspaceRegistry.archivedSessionIds`，创建新 Session 并保留滑动窗口；重载或开启托管时会提前替换恢复出的归档绑定。`blocked` 错误不能单凭结束原因推断为权限配置问题。
-- **思考参数兼容**：旧配置 `llmReasoningEffort: off` 表示省略思考强度字段；直接把字符串 `off` 传给没有该能力的模型会触发 `UNSUPPORTED_REASONING_EFFORT`。桥接已按省略字段处理，并替换旧配置签名对应的 Session。模型失败的具体 code／message 保留在 `stats.lastTurn.failure` 和 `stats.lastError`。
+- **思考参数兼容**（2026-10-29 改语义）：`llmReasoningEffort` **填了就发**，`off` 也发。旧实现把 `off` 当成"省略该字段"，可省略不等于关闭思考 —— 对 pi-ai 路由两者确实等价（`profileOptions` 把 `off` 翻译成不发送），但对 DeepSeek 官方适配器 `off` 是 `thinking: { type: 'disabled' }`，省略就落回默认档继续想。现在先问适配器这个模型认哪些档位（`llm.resolveModelInfo` 的 `reasoning.efforts`，与 DSH 自己的校验同一份元数据）：认就原样发；不认才不发，理由写进 `models.main.reasoningNote` 与面板判定条。真发出去被拒（`UNSUPPORTED_REASONING_EFFORT`）时记 `stats.effortRejected`，同一进程不再发这个档位，并把当前 Session **原地**重选成不带档位（不换会话、不丢上下文）。改模型/改档位也不再用提示词签名触发轮换，而是比对 `entry.modelSignature` 后原地 `selectModel`。实现：`lib/agent/reasoning-effort.mjs`、`lib/conversation/sessions.mjs`。
 - 想让 HMR 直接监听源码，在 profile 的 `cordis.patch.yml` 里加（**需要重启一次才生效**）：
   ```yaml
   - id: hmr
