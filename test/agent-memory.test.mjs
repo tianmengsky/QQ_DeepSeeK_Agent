@@ -57,7 +57,8 @@ try {
     r.call({ action: 'upsert', scope: 'self', slot: 'social.short', kind: 'note', text: '短', version: 0 });
     const diary = r.call({ action: 'read', scope: 'self' });
     assert.equal(diary.hint, undefined);
-    assert.equal(diary.budget, 400);
+    // 钉"预算跟着配置走"，不钉某个具体数字：默认值会随注入预算调整而变。
+    assert.equal(diary.budget, r.cfg.selfNotesMaxChars);
   });
   await test('replay is idempotent and stale concurrent revision cannot overwrite', () => {
     const r = rig(); r.write(); assert.equal(r.write().replay, true);

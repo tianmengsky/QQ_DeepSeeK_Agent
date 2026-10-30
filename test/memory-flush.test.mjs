@@ -161,6 +161,54 @@ try {
     // 不在收尾标记里时，普通会话没有 execution source，守卫照旧放行。
     assert.equal(executionToolGuard(r.store, r.config, exec, { memoryFlushSessions: new Set() }), undefined);
   });
+  await test('日记本条目放宽到 300 字，人/群仍是 120（索引不是文章）', async () => {
+    const { parseNotes, MAX_TEXT, MAX_SELF_TEXT } = __flushTest;
+    assert.equal(MAX_TEXT, 120);
+    assert.equal(MAX_SELF_TEXT, 300);
+    const raw = JSON.stringify({ notes: [
+      { scope: 'self', slot: 'me.open.long', text: '想'.repeat(400) },
+      { scope: 'group', slot: 'a.b', text: '记'.repeat(400) },
+      { scope: 'user', qq: '200', slot: 'profile.city', text: '城'.repeat(400) },
+    ] });
+    const notes = parseNotes(raw, { key: 'group:10', allowedQqs: ['200'], sessionId: 's1' });
+    assert.equal(notes[0].text.length, 300);
+    assert.equal(notes[1].text.length, 120);
+    assert.equal(notes[2].text.length, 120);
+  });
+
+  await test('收尾失败会重试一次：抖动不该丢掉整个窗口', async () => {
+    const entry = { sessionId: 's1', turns: 30, window: [] };
+    const state = { controller: new AbortController(), memoryFlushSessions: new Set(), disposed: false };
+    const stats = {};
+    let follows = 0;
+    // 第一次 follow 直接抛错（模拟上游抖动 / 超时），第二次正常。
+    const ctx = {
+      logger: { info() {}, warn() {} },
+      sessionController: {
+        prompt: async () => {},
+        follow() {
+          const nth = ++follows;
+          return { [Symbol.asyncIterator]: async function* () {
+            if (nth === 1) throw new Error('upstream down');
+            yield { type: 'snapshot', cursor: 0 };
+            yield { type: 'event', event: { type: 'turn/start', data: { turn: 1 } } };
+            yield { type: 'event', event: { type: 'assistant/message',
+              data: { message: { content: [{ type: 'text', text: '{"notes":[]}' }] } } } };
+            yield { type: 'event', event: { type: 'turn/end', data: { turn: 1 } } };
+          } };
+        },
+      },
+    };
+    const memory = { agent: { available: true, write: () => ({ status: 'SAVED' }) }, syncNotebook() {} };
+    const result = await flushMemoryBeforeRotate({ ctx,
+      config: { memoryEnabled: true, rotateEveryTurns: 30, memoryFlushTimeoutMs: 5000 },
+      registry: { entry: () => entry }, state, memory, stats, key: 'group:10' });
+    assert.equal(result.ran, true);
+    assert.equal(follows, 2);
+    assert.equal(stats.memoryFlushAttempts, 2);
+    assert.equal(stats.memoryFlushFailed ?? 0, 0);
+    assert.equal(state.memoryFlushSessions.size, 0);
+  });
 } finally {
   for (const store of stores) { try { store.db.close(); } catch {} }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch {}

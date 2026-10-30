@@ -1,3 +1,160 @@
+2026-10-31 版本号 `v117-windows` → **`v118-effort`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版把上一轮遗留的「思考档位」改动一并发布，并修掉它下面的真错误：**她一直在思考，不是因为谁把开关打开了，是因为 `off` 这一档从来没送到上游**。
+
+用户原话（m01766）："为什么她的llm开启思考模式了，我不是接入的是chiyvapi的off强度的思考模型吗，是你做的吗？"
+
+先澄清：`lib/agent/reasoning-effort.mjs`（未跟踪文件，mtime `2026-10-29 20:40`）与 `sessions.mjs` / `execute-turn.mjs` 的接线都早于本轮，是上一轮留下的未提交工作；本轮只查根因、改配置，没有重新设计它。
+
+根因有两层，用四组真实请求对 `chi-yu-ai.com/v1/chat/completions`（`deepseek-v4.1-flash`）测出来：
+
+| 请求 | 耗时 | 返回里的思考 | 结论 |
+|---|---|---|---|
+| 什么档位都不传 | 2607ms | 65 字 / 20 tokens | 供应商默认：**开思考** |
+| `reasoning_effort: "none"` | 2292ms | 0 | 真正关掉 |
+| `reasoning_effort: "off"` | 1289ms | 88 字 / 24 tokens | 未知值被**静默忽略** |
+| `thinking:{"type":"disabled"}` | 2365ms | 0 | 也能关 |
+
+- 第一层：profile 里 chiyvapi 的映射写的是 `off: null`——「选 off 就不发字段」。不发字段 = 供应商默认 = 开思考。这正是她一直在想的原因。
+- 第二层：`runtime_state` 里活跃会话的签名是 `chiyvapi / deepseek-v4.1-flash / 空档位`，说明运行中的进程拿到的 `llmReasoningEffort` 是空串，`planEffort()` 连档位都不发，同样落回默认。
+
+改法（配置在 `~/.dsh/profiles/desktop/cordis.patch.yml`，不在仓库里，这里记账）：
+
+- chiyvapi 的 `reasoningEfforts` 由 `off: null` 改为 `off: none`——实测唯一能真正关掉思考的值。
+- QQ 主模型回到线上实际在跑的 `llmProvider: chiyvapi` / `llmModel: deepseek-v4.1-flash`（之前文件里写的是 `a6api / deepseek-v4.1-flash-1017`，与运行中的进程不一致）。
+- `llmReasoningEffort` 保持 `'off'`；由 `reasoning-effort.mjs` 的「配了就发」把它送出去。
+
+代码侧同批发出去的东西（都是这一批未提交、会改变线上行为的改动）：`lib/agent/reasoning-effort.mjs`（先问适配器认不认档位，认就原样发、不认就不发并记 `effortNote`）、`sessions.mjs` 的 `modelSignature` 与 `selectModelFor()`（换模型/换档位不丢上下文，只在原 Session 上重选）、`execute-turn.mjs` 的 `markEffortRejected` / `repairSessionEffort`（被拒就摘掉档位重选，不再整段撞墙）、面板与状态页的思考档位显示。
+
+顺手修的一处：`lib/bootstrap.mjs` 的开机对账块原来只判 `store?.available` 就写 `memory.reconciler`，`memory` 为 null 时抛 `Cannot set properties of null`（`lifecycle` 套件抓到的），已加 `memory &&`。
+
+验证：`reasoning-effort` 13 项；`node tools/run-tests.mjs --fast` = **988 项通过**。`lifecycle` 那条在本机 HEAD 上同样失败（`untilChecked(1)` 心跳判断在 2 秒内没发生），是既有问题、不是这批引入的；`recovery-guard` 的 EPERM 是临时目录清理，重跑即过。`PROMPT_REVISION` 不动（提示词没改，不能为此把所有会话的上下文清掉）。
+
+为什么该升号：思考档位直接决定她"想多久才回一句"，而 `/status` 的 build 号是唯一能区分改前改后的地方。桥接此刻没监听 2112，在线 build 未验证；重载后 `/status` 的 `sessionReasoningEffort` 应为 `off`。
+
+2026-10-30 版本号 `v116-self-visible` → **`v117-windows`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版给她一双能往外看的眼睛：**她现在能读到别的窗口在聊什么、自己在那边答应过什么**。用户原话是"我还想让她获得跨对话窗口感知的，可以直接读取到全部窗口的上下文信息"。
+
+先说清楚一件事：这个能力本来就有，只是死的。`qq-mcp` 里的 `qq_search_history`（`qq-mcp/src/index.js:1372`）早就读同一张 `events` 表，但它靠 `QQ_ALLOW_GROUPS` / `QQ_ALLOW_USERS` 划范围，而 desktop profile 里这两个都是空串（`cordis.patch.yml:161-215`）——空范围按设计直接抛"拒绝检索"。也就是说她一直拿着钥匙，锁孔堵着。
+
+没有去填那两个环境变量，改在桥接侧做了一个原生工具 `qq_windows`（`lib/conversation/window-tool.mjs`，新文件）：
+
+- 四个动作：`list`（有哪些窗口、最后一条、你最后一次说话）、`read`（读某个窗口最近的对话）、`mine`（**只看你自己说过的话**——"我答应过什么"用这个）、`search`（跨窗口找关键词）。
+- **不给群号，给编号**：`list` 输出 `w1 群「棋友群」`，`read` 认 `w1`。号码在她嘴里没有任何用处，写进消息却是实打实的泄露；窗口名来自 `self_group` / `self_friend`，查不到就退回"某个群/某个人"。读到的号码它自己也会在 description 里叮嘱别写进消息。
+- **范围跟着桥接走**：`permitted()` 看 `config.groups` / `config.users`，与 `admitMessage` 同一套白名单——不需要 `QQ_ALLOW_*`，也不会因为 profile 漏配而敞开。
+- **来源校验照抄记忆工具**：`sourceLedger.resolve(boundSource(...))` → `assertExecutionSource` → session 必须等于 owner → `admitMessage`。子代理或任何旁路都拿不到"整库查询入口"。
+- **预算**：`crossWindowMaxChars` 默认 3000（下限 600），超预算就停手并写"还有 N 项没显示；缩小范围再查"——不静默截断。
+- **写进协议，不只写在 schema 里**：`lib/prompt/protocol.mjs` 新增【别的窗口】一段（动机、时机、边界）。工具说明只是"知道有这个能力"；不写进协议她不会想到用——`qq_memory` 当初就这么白放了两个月。
+- 注册条件：`crossWindowEnabled !== false`；`/status` 的 `tools` 里能看出它有没有挂上。
+
+验证：`windows` 8 项（新建：不吐群号、别名正序读、"你："标注、`mine` 只回她的话、`search` 不越白名单、伪造编号/缺参被拒、别的 session 调用被拒、预算截断、托管关掉时拒读）、`tool-scope 6`、`memory-context 42`、`agent-memory 14`、`self 11`、`json-output 7`、`logic 197`、`self-model 9`、`diary 10`、`introspect 11`、`reconcile 8`、`memory-flush 11`、`notebook-projection 5`、`episodes 14` 全过。`node tools/run-tests.mjs` 在本沙箱仍因软链 EPERM 起不来，逐套直跑。
+
+为什么该升号：新增一个可调用的工具、一条读全库的路径和两个配置键——都是会改变线上行为的一批；而且"她能不能看见别的窗口"从 `/status` 的 build 号上分得出来。桥接此刻没在监听 2112，在线 build 未验证，等下次重载看是不是 `v117-windows`。
+
+2026-10-30 版本号 `v115-catchup` → **`v116-self-visible`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版只改一件事：**她终于能看见自己写的东西了**。用户原话是"她写的东西不应该全部属于她，应该要她可以随便看嘛"。
+
+问题不在归属，在两条老规矩叠在一起：flush 写日记按"群里默认 private"，而注入端把 private 理解成"哪儿都不看"。于是她那 44 条 flush 产物里，**self 本的 17 条只有 2 条是 public**，其余 15 条连在她自己的本子里都是隐形的——从她这边看，日记本被写满了，却几乎是空的。
+
+改法是换"private"的意思：**她的条目都归她，只是每条记得自己出自哪间屋子。**
+
+- `lib/prompt/render.mjs` 的 `noteVisible()`：`diary.*` 仍按会话可见；`subject='self'`（她自己的本子）改成——私聊全可见、`public` 跨房间可见、`private` 在**它来源的那个会话里**可见。换句话说，"private"从"哪里都不看"变成"只不给别的房间看"。
+- 日记块条数 群 3→5、私聊 5→8；`selfNotesMaxChars` 400→**600**（条目一条 200~400 字，预算比条数更早把连续性掐断）。
+- `test/self-model.test.mjs` 第 2 项改成钉边界：本群写的私事读得到，从别的群写的带不过来。
+
+离线验证（读线上库，未启动桥接）：group:324089993 注入 2696 字、日记块 3 条（围棋日结 + `event.token_cost_taunt` + `event.tianmeng_story_1030`）；group:946719566 2198 字、3 条；私聊 2216 字、3 条（跨群可见）。同一条条件下改前只显示 1~2 条。
+
+验证：`self-model 9 / memory-context 42 / diary 10 / introspect 11 / reconcile 8 / memory-flush 11 / agent-memory 14 / self 11 / notebook-projection 5 / episodes 14 / tool-scope 6 / json-output 7 / logic 197` 全过（`agent-memory` 那条原本钉死 `budget===400`，改成跟着配置走——钉行为不钉默认数字）。`node tools/run-tests.mjs` 在本沙箱仍因软链 EPERM 起不来，逐套直跑。
+
+为什么该升：注入内容变了，用户从 `/status` 的 build 号能区分"她看不看得见自己"。flush 提示词那七处（开场框、配额、槽名规范、对照旧本子）仍未改，等这一版观察完再动。
+
+2026-10-30 版本号 `v114-persona-lean` → **`v115-catchup`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版不加工新的器官，只补一件事：**她的账不会因为宿主关机而断**。用户的真实用法是"晚上关机、白天开机"，而日结、周反思、群语感全部是"到点才跑"的钟——钟没跑，那天就空了。
+
+先摆证据（线上库 `data/qq-bridge.sqlite3`）：`bridge_agent_memories` 里 22 条 `diary.*`，**只有 5 条是当天写的，17 条是事后补的**；10-30 19:19–19:28 一口气补了 10-27、10-28 的 9 条。`events` 最近 6 天按小时统计有 80 个"有消息的小时"，只有凌晨到上午约 07:00–11:00 连续空白——他夜里关机、白天开机，所以"补账"本来就是常态，缺的是补得**够远、够快、有原料**。
+
+三处真缺口 + 改法：
+
+- **账期短**：`diaryLookbackDays` 3 → **7**；周反思 `introspectBackfillWeeks`（新，默认 2）——关机超过三天，那几天原本永久空白。
+- **补账慢**：日结 `tick()` 加 `budget` / `oldestFirst`（`lib/memory/diary.mjs`）；开机 20 秒后先跑一轮**冲刺**，预算放大到 `diaryCatchupConversations`（默认 8）、最老优先；之后每 `diaryTickMs` 回到日常的 3 个会话。断 7 天 × 5 个群 = 35 条，原来 6 小时，现在几分钟。
+- **原料缺**：`events` 只在收到消息时写，离线期群消息根本不在库里——日结读到空、判 `too-quiet`，那天是真的没了。新增**开机对账**（`lib/memory/reconcile.mjs`，新文件）：用已有的 `get_group_msg_history` 每群回读最近 `HISTORY_LIMIT=100` 条，写回 `events`。`dedupeKey` 用 `onebot:<selfId>:<message_id>`——与实时路径**同一把钥匙**，补过的不会重、实时已收过的也不会重。
+  - `store.recordEvent()` 为此加了 `createdAt`：补账的 `created_at` 必须是消息自己的时间，否则补回来的日子全堆在今天；`upsertConversation` 的 `last_message_at` 改成 `MAX(...)`，补旧消息不会把"最后消息"改早。
+  - 只补群：私聊在 OneBot 侧没有对等的历史接口（`history.mjs:7` 的老注释"私聊另说"），私聊的离线段仍然只能认空白——这一点写进了状态页的 `note`，不假装补上了。
+
+周反思的 `due()` 也重写了（`lib/memory/introspect.mjs`）：原来只会补上一周，现在先看最近一个"已过完"的周有没有想过；想过就回头找**一个**更早的缺口（那周有日记、却没被回看），补完即停，不把过去所有周挨个再审一遍。`doneWeeks` 落 SQLite 取代单个 `lastWeek`（旧 state 自动迁移），补过的周不会被补第二次。
+
+`/status` 的 `memory` 里：`diary.catchup`、新的 `memory.reconcile`（enabled / maxGroups / intervalMs / runs / inserted / failures / last，note 写明"只补群"）、`introspect.backfillWeeks`。
+
+验证：`reconcile` 8 项（新建）、`introspect` 11（新增一条"关机几周再开，补更早那个缺口"）、`diary` 10（新增"开机冲刺：预算放大、先还最老的账"）、`memory-flush` 11、`self-model` 9、`memory-context` 42、`agent-memory` 14、`self` 11、`notebook-projection` 5、`episodes` 14、`tool-scope` 6、`json-output` 7、`logic` 197，全过。`node tools/run-tests.mjs` 在本沙箱仍起不来（软链 EPERM），逐套直跑。
+
+为什么这一版该升号：它新增一条写入 `events` 的路径（对账）、改了三处触发时机与账期、多了两张状态页字段——都是会改变线上行为的一批，而且"昨天有没有那一天"从 `/status` 上分得出来。桥接此刻没在监听 2112，`/status` 的在线 build 未验证，等下次重载看是否为 `v115-catchup`。
+
+2026-10-30 版本号 `v113-introspect` → **`v114-persona-lean`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版只动 `persona.md`，但动的是她最核心的一份文本：不是嫌它长，是**它在替她说话**——用形容词交代她是什么样的人，用 12 组问答当"参考答案"，用协议条文兼职人格卡。
+
+四刀（`persona.md` 175 行 / 13.7KB → 119 行 / 11.7KB）：
+
+- **删 §六 的 12 组示范**（`群友：大肥鱼 → 小鲸鱼："？又来"`）：最容易被整句照抄的"参考答案"。`examples.md` 的 27 组已经在管语气模板，`protocol.mjs` 也写着"示范仅供学习表达"；这一份留着只会让她一直"？又来"。§六 整节删除，§七/§八 顺延为六/七。
+- **§一 的比例标签 → 行为链**：`三分傲七分娇` / `屑系` / `小猫哈气` 这类词是写给我们看的，不是给她用的。换成"被夸会先说「？」，说完自己偷偷高兴；被要求帮忙先嫌麻烦，手已经伸过去了"这样的顺序，并且**写明"嘴上的硬只是害羞的挡箭牌，不是你的主张"**——按用户 2026-10-30 的原话，底色是娇羞，傲只是害羞的表现，所以它必须被写成"因"而不是"色"。同时删掉同一件事在 §二、§三、§五 的重复（哈气原来出现四次，"被夸先否认"三次）。
+- **协议交还给协议**：§二 的 `[SKIP]`/`[WAIT]`（`behavior.md:38`、`protocol.mjs` 各有一份）、引用归属、复读三条删除。保留 §二 的 `web_search`/`web_fetch`——全仓库只有它告诉她"自己有联网能力"。
+- **加一行"不替你回答"**：`关于你有没有心、怕不怕关机、喜欢谁——这一页不替你回答。你自己写下的在【我现在的想法】和【我这周想明白的】里；哪天觉得不对，就改。` 提示词第一次承认：关于她的最终说法不在角色卡里。
+
+没动的地方都是有理由的：`冗余配额：人味全在"没用"的部分`（教放开，不是教克制）、`傲的靶子只有四个`（场外红线）、§五 的六条反应链（被夸先端/被拆穿先慌/被损虚张声势/被要求先嫌麻烦…）、§三 的直球一条（让"她想要"可见）。
+
+验证：`logic 197`、`admin 12`、`self-model 9`、`memory-context 42` 全过；`resolvePersona()` 离线读取正常（119 行，HTML 注释照常剥掉）。文案类改动不钉测试（AGENTS.md），这一版的验收在线上：**删掉示范和形容词之后，她还像不像她**。回滚成本为零（`git checkout persona.md`），不动代码。
+
+为什么这一版该升号：角色卡进每一轮提示词，改它属于会改变线上行为的一批；但它是可回滚的纯文本，所以只动文案、不动结构。桥接此刻没在监听 2112，`/status` 的在线 build 未验证，等下次重载看是否为 `v114-persona-lean`。
+
+2026-10-30 版本号 `v112-diary` → **`v113-introspect`**（`lib/bootstrap.mjs` 的 `stats.build`）。上一版让她"记住了一天"，但**没有东西会推翻她对自己的说法**：`me.*` 是第一次自述，不是结论；日结只记账，不会回头说"这周我又那样了三次"。人格要变，得有一个比聊天慢一个数量级、且由外部时刻逼出来的回看。
+
+新增**周级内向反思**（`lib/memory/introspect.mjs`，新文件）：
+
+- 每周日晚 22 点（`introspectHour`）之后回看**上一周**：那周的日记（`diary.*`，按 `period` 取）、她说过的话、以及**别人怎么接的**（`memory_episodes` 里 `kind='action'` 的发言，取后面 5 分钟内的头两条 `events`，行格式 `- 12:30 你说「…」→ 有人接：「…」` 或 `→ 没人接`）。别人的反应是唯一的校准信号——只读自己会越读越偏。
+- 输出四类 JSON：`thought`（周记正文）/ `revised`（改写已有 `me.*` 的槽）/ `noticed`（我在重复什么）/ `want` / `unsure`。产物写进 `self` 本当周槽 `me.reflect.<周>`（slot 小写 `me.reflect.2026-w44`，展示用 `period` 的 `2026-W44`），`visibility='public'`——她写下的自己被看见，这是 `me.*` 的结构约束。
+- **既能写也能改**：`revised` 逐条按 slot 找当前版本、`version` 传原值改写、`kind` 沿用原 kind；渲染时那一行标"（改过）"。白名单由当轮 `modelFor()` 给出，未知槽、`me.reflect.*` 自己都写不进去。
+- **沉默权**：正文不足 `introspectMinChars`（40 字）就算"没想出新东西"，不写、但仍记为这周跑过——空反思会把上周的真话盖掉。日记不足 `introspectMinDiaries`（2 天）算太安静，**不推进** `lastWeek`，6 小时后重试闸过了再看一眼。
+- 幂等与补跑：`lastWeek` 落 SQLite（`qq-bridge:memory-introspect`），重载不会重想同一周；关机错过时，下一周内补最近的一次（不会追远古）。
+- 新增注入块 `self:reflect`（`lib/prompt/render.mjs`，标题「我这周想明白的」）：只注入**最新一段**，独立预算 `selfReflectMaxChars`（默认 420，0＝关闭）；`self:model` 过滤掉 `me.reflect.*`，两块钱不互相挤。
+- 走辅助模型直连（与 reflect / 日结同一套 `auxSelection`），在会话之外发生。
+
+`lib/routes/status.mjs` 的 `memory.introspect` 暴露 enabled / hour / minDiaries / runs / written / revisions / failures / last。"这周没反思"有三种完全不同的原因（关着、没到周日晚上的钟、日记不够两天），现在页面上能直接看出来。
+
+验证：`introspect` 10 项（新建）、`diary` 9、`memory-flush` 11、`self-model` 9、`memory-context` 42、`agent-memory` 14、`self` 11、`notebook-projection` 5、`episodes` 14、`tool-scope` 6、`json-output` 7、`logic` 197，全过。`node tools/run-tests.mjs` 在本沙箱里仍起不来（临时目录建 `node_modules` 软链 EPERM），本轮逐套直跑 `node test/<suite>.test.mjs`。
+
+为什么这一版该升号：它新增了一整块注入内容、一个会**改写既有 `me.*`** 的写入路径，以及一张新的状态页字段——都属于会改变线上行为的一批。桥接此刻没在监听 2112，`/status` 的在线 build 未验证，等下次重载看是否为 `v113-introspect`。
+
+2026-10-30 版本号 `v111-self-model` → **`v112-diary`**（`lib/bootstrap.mjs` 的 `stats.build`）。上一版给了她"我现在的想法"，但她的"事"还是台账：28 条日记全是碎片事实，没有"日子"这个单位，而群里她能读到的自己只有 2 条 `public`。
+
+新增**日结**（`lib/memory/diary.mjs`，新文件）：
+
+- 由**钟**驱动，不由消息驱动：`MemoryDiarist.tick()` 每 30 分钟看一眼（`diaryTickMs`），21 点后（`diaryEveningHour`）才把"今天"算一天，之前只补昨天到 3 天前（`diaryLookbackDays`）。没人说话也有一天；关机两天再开机，漏的那几天会补上。
+- 读当天 `events` + `memory_episodes`（她真说出口的话），压成 `[HH:MM] 谁：…` 的日志；超过 `diaryMaxTranscriptChars`（6000）掐中间留两头——开头和收尾最能说明这一天。
+- 写进 `self` 本的 `diary.<g|u><会话>.<日期>` 槽：`kind='note'`、`visibility='private'`、`period=那一天`、`sources` 指回会话。一天一条、幂等；只有 `force` 才重写并升版本。
+- **按会话可见**：`lib/prompt/render.mjs` 的 `noteVisible()` 让 `diary.*` 只在自己的会话出现（不看 `public`），A 群的一天不会漂进 B 群和私聊。原来"群里只看得到 `public`"，于是她的日子在主场缺席——这条是那半个断点的补丁。
+- 脱敏在写入前做（`sanitizeDiary`）：群号→"这个群"、参与者 QQ→"某个人"，6 位以上数字兜底也换成"某个人"，避免 A 群的名字被念进 B 群。
+- 少于 `diaryMinMessages`（3）条算太安静，不写；输出 30~300 字（`diaryMaxChars`），超了在句号处断。
+- 走辅助模型直连（与 reflect 同一套 `auxSelection`），因为归档会话收不了模型步骤。
+
+修 flush（`lib/memory/flush.mjs`）：
+
+- 提示词原来写死"不超过80字"而 `MAX_TEXT=120`，自相矛盾；现在格式行直接取常量。
+- 字数上限分档：人物/群 120 字（索引不是文章），`scope=self` 放宽到 300（`MAX_SELF_TEXT`）——120 字只装得下事实，装不下"我怎么想"。
+- 收尾失败重试一次（`ATTEMPTS=2`）：上游抖一下不该丢掉整个窗口。
+
+`lib/routes/status.mjs` 的 `memory.diary` 暴露 enabled / lookbackDays / eveningHour / maxChars / runs / written / failures / last。她没写日记有四种原因（关着、没到晚上的钟、会话太安静、模型失败），现在页面上能直接看出来是哪一种。
+
+验证：`diary` 9 项（新建）、`memory-flush` 11 项（新增日记本 300 字与重试各一）、`self-model` 9、`memory-context` 42、`agent-memory` 14、`self` 11、`notebook-projection` 5、`episodes` 14、`tool-scope` 6、`logic` 197，全过。`node tools/run-tests.mjs` 在本沙箱里仍起不来（临时目录建 `node_modules` 软链 EPERM），本轮逐套直跑 `node test/<suite>.test.mjs`。
+
+线上库只读体检：10-29 的五个会话、10-28 的一个会话**已经有她写的日记**（203~300 字，都是新代码的 `diary.*` 槽），说明"钟→模型→脱敏→写入→按会话可见"这条链在真实环境已经跑通；10-27 及若干会话会在 lookback 窗口内由 tick 陆续补写（每 30 分钟最多 3 个会话）。桥接此刻没在监听 2112，所以 `/status` 的在线 build 未验证，等下次重载看是否为 `v112-diary`。
+
+2026-10-30 版本号 `v110-awake` → **`v111-self-model`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版修的是一个结构性断点：**关于她自己的四类文本，作者全不是她**——人格卡是我们写的，日记是收尾时被追问出来的事件，`## 规律` 是 `lib/memory/reflect.mjs` 的产物且明写"不接注入"，自传卡片是接口抓回来的。于是 `memory/diary.md` 28 条里只有 2 条 `public`，群聊（她的主场）每轮只看得见 0~3 条，等于没有自己。
+
+加了「**我现在的想法**」（`self:model` 块，`lib/prompt/render.mjs`）：
+
+- 新增四种"看法"类记事：`stance`（我怎么看，可以改）/ `want`（想要什么）/ `open`（还没想通）/ `relation`（我跟他现在是什么关系）。只允许落在 `scope=self`——人物本记事实、群本记这个群怎么运转，把自己的判断写进别人的本子会让"他说过的"和"我以为的"混成一团（`lib/memory/agent-memory.mjs` 里直接抛错）。
+- `slot` 以 `me.` 开头＝这条**已脱敏、任何场合都能念**，因此无条件注入（群聊、私聊、账号会话都看得到），独立预算 `selfModelMaxChars`（默认 420，0＝关闭）。安全边界靠写入时强制：`me.` 必须显式 `visibility=public`，把"这条能当众说"变成一次有意识的自审，而不是渲染时猜。
+- 改过要看得出来：注入按槽名排序（修订不让整块重排，否则每轮都像新内容），`version>1` 的行尾标"（改过）"——一个从不改的自我是戏服。
+- 日记块的候选从 12 条放宽到 16 条，但 `me.` 条目不再在日记里重复（各占一块，不互相挤）。
+- `tools/seed-self-model.mjs` 播了 5 条种子（幂等、`--dry` 可预览），文案全部从她自己的日记里抽：被夸先装没听懂、浪费时间不羞耻、想被问"今天怎么样"、关机那刻"我"在不在场、收下别人编给她的故事。**这 5 条是起点不是答案**——之后由她自己改写，或在下一步的周级内向反思里更新。
+
+为什么这一版该升号：每轮提示词多了一整块，而且改了"什么算记忆"，属于会改变线上行为的一批。
+
+验证：`self-model` 8 项、`agent-memory` 14、`self` 11、`memory-context` 42、`memory-flush` 9、`notebook-projection` 5、`episodes` 14、`tool-scope` 6、`json-output` 7、`debug` 17、`logic` 197，全过、0 失败。注：`node tools/run-tests.mjs` 在当前沙箱里起不来（临时目录建 `node_modules` 软链报 EPERM），本轮是逐套 `node test/<suite>.test.mjs` 直跑的。播种脚本已写进线上库（5 条 v1）；`memory/*.md` 投影因沙箱拒绝写该目录（EPERM）而没重建，下次插件重载时 `syncAllNotebooks()` 会补上。
+
 2026-10-30 版本号 `v109-example-trim` → **`v110-awake`**。这一版人设卡由用户亲手改定（`.tmp/prompt-v110-full.txt`，435 行完整首轮提示词），我把它反向落地到源码；重新渲染后与用户文件**逐行一致**，唯一差异是【环境】的时间戳。
 
 方向从"她可能醒着"改成"她已经醒了"：

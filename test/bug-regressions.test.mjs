@@ -137,16 +137,16 @@ await test('blocked turns report the session and do not infer a permission setti
   assert.equal(r.stats.lastTurn.sessionId, 's1');
   r.sendQueue.dispose();
 });
-await test('legacy off omits reasoning control and replaces the incompatible saved binding', async () => {
+await test('configured reasoning level is sent as-is, including off, and a stale binding is replaced', async () => {
   for (const effort of ['off', 'low']) {
     const r = rig({ llmProvider: 'qq-provider', llmModel: 'qq-model', llmReasoningEffort: effort });
     const selections = [];
     r.ctx.sessionController.selectModel = async (request) => {
       selections.push(request);
-      if (request.reasoningEffort === 'off') throw Error('UNSUPPORTED_REASONING_EFFORT');
       return { selected: request };
     };
     if (effort === 'off') {
+      // 老版本存下来的绑定（off 被当成"不发送"）必须被换掉，而不是继续沿用。
       const entry = r.registry.entry('group:10');
       entry.sessionId = 'incompatible-old';
       entry.turns = 1;
@@ -157,7 +157,8 @@ await test('legacy off omits reasoning control and replaces the incompatible sav
     assert.equal(selections.length, 1);
     assert.equal(selections[0].provider, 'qq-provider');
     assert.equal(selections[0].model, 'qq-model');
-    assert.equal(selections[0].reasoningEffort, effort === 'off' ? undefined : 'low');
+    // 配了什么就发什么：老语义把 off 换成 undefined，正是这次要修的设计错误。
+    assert.equal(selections[0].reasoningEffort, effort);
     r.sendQueue.dispose();
   }
 });
@@ -174,6 +175,29 @@ await test('model errors retain their exact code and message in the bridge statu
   assert.deepEqual(r.stats.lastTurn.failure, failure);
   assert.match(r.stats.lastError, /UNSUPPORTED_REASONING_EFFORT.*模型不支持 off/);
   assert.equal(r.calls.length, 0);
+  r.sendQueue.dispose();
+});
+await test('a refused reasoning level is recorded once and the session is re-selected without it', async () => {
+  const r = rig({ llmProvider: 'qq-provider', llmModel: 'qq-model', llmReasoningEffort: 'off' });
+  const selections = [];
+  r.ctx.sessionController.selectModel = async (request) => {
+    selections.push(request);
+    return { selected: request };
+  };
+  const failure = { code: 'UNSUPPORTED_REASONING_EFFORT', message: '模型不支持 off' };
+  r.ctx.sessionController.follow = () => ({ async *[Symbol.asyncIterator]() {
+    yield { type: 'snapshot', cursor: 0 };
+    yield { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } };
+    yield { type: 'event', event: { seq: 2, type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'error', error: failure } } } };
+  } });
+  await r.post(message(1, 'deepseek 在吗'));
+  assert.equal(r.stats.effortRejected.effort, 'off');
+  assert.equal(r.registry.effortRejected.effort, 'off');
+  // 修：同一个会话被重选成"不带档位"，不必等下一次轮换。
+  const repair = selections.filter((s) => !('reasoningEffort' in s));
+  assert.equal(repair.length >= 1, true);
+  assert.equal(repair.at(-1).sessionId, r.prompts[0].sessionId);
   r.sendQueue.dispose();
 });
 await test('B05 later turns include new background even when memory is disabled', async () => {

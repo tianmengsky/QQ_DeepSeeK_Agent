@@ -34,6 +34,11 @@ const suites = [
   'memory-flush',
   'memory-reflect',
   'self',
+  'self-model',
+  'diary',
+  'reconcile',
+  'introspect',
+  'windows',
   'notebook-projection',
   'lifecycle',
   'launcher',
@@ -54,6 +59,7 @@ const suites = [
   'recovery-guard',
   'panel',
   'admin',
+  'reasoning-effort',
   'bili-ingress',
 ];
 /**
