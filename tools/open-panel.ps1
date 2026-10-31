@@ -104,6 +104,8 @@ if ($Port -gt 0) {
     Say '  1) DSH 起来了吗？（它是 DSH 的 webServer，插件没加载就没有这个地址）' 'Yellow'
     Say '  2) 端口变过了？可以指定：open-panel.bat -Port 10692' 'Yellow'
     Say "  3) 路径改过？默认 $Path，可以指定：open-panel.bat -Path /qq/onebot" 'Yellow'
+    # 面板挂不上时最有用的动作就是去看控制台：它不依赖桥接，还能把 DSH 拉起来。
+    Say '  4) 想看"到底是哪一层没起来"，用独立控制台：双击 console.bat（http://127.0.0.1:7788/）' 'Cyan'
     exit 1
   }
 }

@@ -1,3 +1,28 @@
+2026-10-31 版本号 `v119-window-search` → **`v120-panel-judgement`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："我现在用的这个项目的open panel面板好难用，画面结构也不舒服，能不能优化一下？起码还有让我看见aux的消息判断，看见aux模型为啥选择接话或不接话"。
+
+改了什么：
+
+- **判断流**（面板第一屏左上，新视图）：`GET /qq/onebot` 新增 `auxDecisions`，最多 80 条，新的在前。每条给四样东西——判的是哪句话（`subject`，谁说了什么）、结论（`verdict`：接话／不接／插话·开放话题／照发／撤下不发／路由到哪／判断失败）、模型自己给的理由（`reason`，就是它 JSON 里的那个字段）、以及它吐的原文（`sample`，点一下展开）。健康度那种"成功率 95%"回答不了"她为什么不吭声"，这一屏才回答得了。
+- **本地规则也进流，但不进健康度**：被 @ 别人、引用别人的话、叫她名字、三条"不问模型直接回"的护栏（请求型／被点名提问／长问句）、以及判断失败后的 fail-open，全部记 `kind: 'rule'`。少了这条通道，绝大多数消息在面板上根本不会出现——它们压根没发请求。规则记录单独限 120 条，不挤占模型调用；`auxHealth` 的成功率/失败数只算模型调用。
+- **四个调用点补埋点**：参与决策（`reply-decision`）、心跳插话（`heartbeat`）、楼层复核（`floor`）、语义路由（`routing`）在 `recordAuxCall` 时一并带上结论、理由、被判内容与原文。`AUX_LABELS` 补了 `diary`/`introspect`，判断流里不再出现英文键名。
+- **版式重做**：单列叠六张重边框卡片 → 两栏（左「判断流」自己滚 560px，右「运行状态」）+ 会话表独占一整行 + tab 卡。卡片改 1px 细线、去掉层层虚线套框，字阶统一到 12/12.5/13.5。判断流可按调用点筛选（全部／参与决策／心跳／楼层／路由／记忆等），还有一枚"只看没接"；会话名可点，直接跳到那个群的窗口与事件流。
+- **运行状态新增两行计数**：参与决策（问模型几次／判不接几次／护栏直放几次／判断失败几次）与心跳（检查／判不插／插了），配合 `participation` 新暴露的 `longAsk`/`explicitAsk`。判断流看"这一次为什么"，这两行看"这段时间的比例"。
+- `tools/preview-panel.mjs`：把面板包一层假 `fetch` 渲染成静态页，改版式时不开桥接也能截图核对（本次就是用它验的昼/夜/窄屏三套）。
+- **顺带补上 `qq_windows` 的"命中带上文"**（与面板同一批落地，`lib/conversation/window-tool.mjs`）：`search`/`mine` 的每条命中都带紧挨着的上一句，且只在上一句不是她自己说的时带，渲染成 `‹上文› 10-30 23:14 天梦：口令设成「那天你说的话」`。缘由是她查"口令"时带了 `speaker: "me"`，只搜到自己的三句反问，对方定口令的那句被过滤——她拿着半句就去群里接了话。只补上一行，不把整个窗口倒出来。`read` 带 `query` 时也回命中行加前后各一条。协议里同步加了一句"要在这边提起那边说过的话，先 read 那个窗口把原话看清"。
+
+验证：`panel` 11 项、`aux-health` 19 项（新增 2 项：判断流带结论与原文且规则不拉低成功率；注意力闸门走完后判断流有记录、`replyDecisionChecks/Silent` 照旧 +1）、`windows` 13 项（新增 2 项：search speaker=me 命中带上一句；mine 带上下文但不把别人的话算成她说的）；`--fast` **1008 项通过**。`lifecycle`（`linked.some is not a function`，Node 22.22 的内部 loader 形状变了，另有一层是临时目录 `EPERM` 清理失败）与 `workspace`（Windows 上 `tar` 退出 128）是环境/既有问题，与本批无关——`lifecycle` 在 `ff87d4b` 的干净 worktree 上同样失败。`PROMPT_REVISION` 不动：`【别的窗口】` 那两句是静态块，升 revision 会把所有在跑会话的上下文清掉；工具 schema 每轮都在，新的用法她立刻看得见。
+
+2026-10-31 版本号 `v118-effort` → **`v119-window-search`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版只改 `qq_windows` 的用法：她试过一次之后的原话是"想不起来'那个窗口我答应过什么'的时候得先 list 再 read，两下嘛……能直接搜就更好啦"。
+
+改了什么：
+
+- `action=search` 加 `speaker`（`any`/`me`/`them`）与可选 `conversation`——"我答应过什么"可以一次直接问，不用先 list 再 read；`speaker=me` 只看她说过的话。
+- `action=read` 带 `query` 时只回命中行 + 前后各一条（不再整窗倒出来）；`action=mine` 带 `query` 只回某件事。
+- 协议【别的窗口】从"list 先看、read 读某个窗口"改成"只记得一句话就直接 search，不用先 list 再 read"；工具 description 同步写了这句，所以不用等静态块重发也立刻生效。
+- 权限没动：白名单、来源四道校验、别名只给 w1/w2 不给群号，全部原样。
+
+验证：`windows` 11 项（新增 3 项：speaker=me 只回她说的、mine 带 query、read 带 query 回命中行与上下文）；`--fast` 988 项里 windows 全绿，`lifecycle` 的 `untilChecked(1)` 是既有问题（在 HEAD 上同样失败）。`PROMPT_REVISION` 不升——升了会把所有在跑会话的上下文清掉，而工具 schema 每轮都在。
+
 2026-10-31 版本号 `v117-windows` → **`v118-effort`**（`lib/bootstrap.mjs` 的 `stats.build`）。这一版把上一轮遗留的「思考档位」改动一并发布，并修掉它下面的真错误：**她一直在思考，不是因为谁把开关打开了，是因为 `off` 这一档从来没送到上游**。
 
 用户原话（m01766）："为什么她的llm开启思考模式了，我不是接入的是chiyvapi的off强度的思考模型吗，是你做的吗？"
@@ -1319,6 +1344,71 @@ curl.exe -sS -X POST http://127.0.0.1:19387/qq/onebot/control `
 
 关掉时插件仍然**静默接受**上报并回 204，所以 SnowLuma 不会因为连接失败而报错或重推。
 
+### 崩溃保护：DSH 起不来时先看 cookie 库
+
+2026-10-31 的事故：DSH 弹窗 `DeepSeek Harness is unavailable — desktop welcome: Web authentication failed`，点"关闭第三方插件并重启"**也没用**。
+
+根因不在插件、不在 profile，而在 Chromium 的 cookie 库：DSH 每次启动都会往 `%APPDATA%\@deepseek-ai\dsh-desktop\Network\Cookies` 写一个 `dsh-auth-<随机>`；cookie 是**按域名**存的，而启动端口每次都不一样，所以旧的那些永远不会被复用、也从来没被删。本机堆到 **71 个**之后，每次请求都带着 71 个历史令牌，Host 认不出来就回非 2xx —— 于是外壳拿不到自己的登录态，启动失败。它还会伪装成"插件坏了"，因为报错发生在插件加载之前。
+
+```
+node tools/dsh-guard.mjs status      # DSH 在不在、认证 cookie 堆了多少、上次怎么崩的
+node tools/dsh-guard.mjs prune       # 清掉（先备份 Cookies.bak-<时间>）
+node tools/dsh-guard.mjs watch       # 守护：掉了先修剪再拉起，退避 30s→1m→2m→5m
+```
+
+三层保护：
+
+| 什么时候 | 谁来做 | 行为 |
+|---|---|---|
+| 用 `start-dsh.ps1` / 控制台启动 | 脚本自己 | 启动前自动 `prune`，DSH 没跑才动手 |
+| 你自己双击 DSH | `dsh-watch.bat`（双击后窗口留着） | 30 秒探一次，发现它掉了就修剪 + 拉起，日志同时写 `%TEMP%\qq-dsh-watch.log` |
+| 想先诊断 | `node tools/dsh-guard.mjs status` | 顺带把最近一次崩溃分三类：认证失败 / 热重载竞态 / 其他 |
+
+两条硬约束：
+
+- **DSH 在跑的时候不要动那个库**。Chromium 独占着它，连只读都打不开（`prune` 会直接告诉你"正在运行，先关掉"）。这也是为什么只能在启动前清。
+- `watch` 只负责把掉下去的那截接回来，**永远不主动关 DSH**；连续失败按阶梯退避，不会变成重启风暴。
+
+### 控制台：桥接挂了也能开的那一页
+
+面板有个先天缺陷：它由桥接插件自己挂出来，**桥接一挂、DSH 一关，页面跟着消失**——而那正是最需要看它的时候。控制台是一个独立 node 进程，补的就是这段：
+
+```
+双击 console.bat                         # 没在跑就起一个，然后开 http://127.0.0.1:7788/
+console.bat -Port 7799                   # 换端口
+console.bat -Stop                        # 停掉控制台（DSH / QQ 一概不动）
+```
+
+它把三件事分开报，因为它们的修法完全不同：
+
+| 卡片 | 怎么判 | 挂了会怎样 |
+|---|---|---|
+| **DSH** | 进程名像 `DeepSeek Harness` 的 pid → 它名下 LISTEN 的端口（`netstat -ano` + `tasklist /FO CSV`） | 全都没了，页面还在 |
+| **桥接** | 拿上面这些端口逐个 GET `/qq/onebot`，只认带 `ok`/`agentEnabled` 的 JSON | DSH 在跑但插件没加载 → 卡片显示「DSH 在跑，但 /qq/onebot 没响应」 |
+| **SnowLuma** | `POST 127.0.0.1:16000/get_status` + `get_login_info`（令牌从 `config/onebot_<uin>.json` 读，不出服务端） | 接口在但账号掉了 → 「接口在，账号没就绪」，和"没启动"分得开 |
+
+能点的事：**一键启动全部**、单独启动 DSH、启动接入、开/关托管、重置托管、打开 DSH、打开面板。
+
+顺序是硬性的 —— **DSH → 桥接插件 → SnowLuma 与托管**。接入端要往桥接上报群消息，桥接没起来就先起接入，`Sync-SnowLumaBridgeUrl` 会把上报地址写成一个还不存在的端口，消息全部丢失。所以「启动接入」在桥接没起来时是禁用的，并直接说明原因。
+
+控制台自己**不实现**任何 QQ 逻辑：启动接入一律调 `tools/start-qq-mcp.ps1 -Mode start`（互斥锁、复用在线账号、同步上报地址都在那里），启动 DSH 调 `tools/start-dsh.ps1`，它只负责顺序、超时（240 秒）和把子进程输出实时搬到页面日志里。同一时刻只允许一件事在跑。
+
+配置全走环境变量（都能在 `--flag` 形式下覆盖，因为 WMI 起进程带不了环境变量）：
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `QQ_CONSOLE_PORT` | 7788 | 控制台端口 |
+| `QQ_ONEBOT` | `http://127.0.0.1:16000` | SnowLuma 的 OneBot 接口 |
+| `QQ_SNOWLUMA_DIR` | `..\..\SnowLuma-validation\runtime` | 读 OneBot 令牌用 |
+| `QQ_DSH_EXE` | 自动 | DSH 可执行文件，猜不到时指给它 |
+| `QQ_BRIDGE` | 自动发现 | 直接指定桥接地址 |
+| `QQ_PANEL_TOKEN` | 空 | 桥接配了 token 时用（只留在服务端） |
+| `QQ_CONSOLE_TOKEN` | 空 | 给控制台自己加一道口令 |
+
+安全边界：只监听 `127.0.0.1`；写接口（`POST /api/action`）带 Origin 就必须与 Host 同源，`Sec-Fetch-Site: cross-site` 一律 403 —— 这个进程能拉起进程，不能让任意网页 POST 进来。它没有退出登录、没有端口转发，不会出现在局域网里。
+
+启动方式是 WMI 建进程（`Invoke-CimMethod Win32_Process.Create`），不是 `Start-Process`：后者挂在当前窗口的作业对象下面，关掉批处理窗口就一起没了。输出重定向到 `%TEMP%\qq-console.log`——WMI 起的进程没有可写的控制台句柄，不重定向的话它第一次 `console.log` 就可能 EPIPE 崩掉。
+
 ### 面板：一页回答"活着吗 / 哪坏了 / 慢在哪"
 
 ```
@@ -1342,12 +1432,13 @@ open-panel.bat -NoOpen         只打印地址
 | 你看到的 | 它怎么来的 |
 |---|---|
 | 顶部判定条 | `lib/panel/verdicts.mjs` 纯函数（零依赖，node 单测和浏览器跑同一份源码），红 > 黄 > 灰排序，每条带「看明细 →」跳到对应 tab |
+| 判断流 | `status.auxDecisions`：最近 80 条辅助判断，每条带「判的是哪句话 / 结论 / 模型自己给的理由 / 它吐的原文」，可展开原文、按调用点筛选、「只看没接」。本地规则裁决（被 @ 别人、叫她名字、三条护栏、fail-open）也进流，但不计入 `auxHealth` 的成功率 |
 | 会话表 | `awake` + `heartbeat.groups` 拼的，默认只列 24h 内有动静或清醒中的，勾「显示全部」看全量 |
 | 任务 / 投递 | `tasks`（含排队输入与活跃执行）、`replyDelivery` 的待送达与最近失败 |
 | 失败面 | `reliability` + `stats.recovery` + `stats.lastError`，底部是处置记录 |
 | 设置 | `lib/admin/spec.mjs` 白名单 + `GET/POST /qq/onebot/admin/*` |
 | 记忆 | `memory/` 目录（`diary.md`、人物卡、`groups/`） |
-| 最近一次 | 最后一个回合、prompt 组成、登录、出站队列、辅助层 |
+| 运行状态（右栏） | 最后一个回合、参与决策/心跳的比例计数、prompt 组成、模型与档位、辅助层成功率、登录、出站队列 |
 | 原始 JSON | 折叠在底部，接口原样，没美化 |
 
 右上角的托管开关走 `POST /qq/onebot/control`（`confirm` 一次才发）。`?tab=delivery` / `?tab=failures` / `?tab=settings` / `?tab=memory` 可以直接落到某个 tab。

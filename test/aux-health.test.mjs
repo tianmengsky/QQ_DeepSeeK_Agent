@@ -21,9 +21,11 @@ import { decideReply } from '../lib/application/reply-decision.mjs';
 import { evaluateAttention } from '../lib/application/attention.mjs';
 import {
   AuxProbe,
+  auxDecisions,
   auxFailure,
   auxHealthSnapshot,
   recordAuxCall,
+  recordRule,
   resetAuxHealth,
 } from '../lib/agent/aux-attribution.mjs';
 import {
@@ -329,6 +331,50 @@ try {
     assert.equal(thinkingVerdict.cause, 'empty-output');
     assert.match(thinkingVerdict.detail, /reasoning 1 段/);
   });
+
+  await test('判断流带结论、理由和原文，但本地规则不拉低成功率', () => {
+    resetAuxHealth();
+    // 规则裁决：被 @ 别人、引用别人的话这类根本不发请求，只进判断流。
+    recordRule('reply-decision', { verdict: '不接', reason: '明确 @ 其他成员，旁听', subject: '甲：今晚打游戏吗' });
+    recordAuxCall('reply-decision', { ok: true, durationMs: 900, textChars: 16,
+      verdict: '不接', reason: '群友之间闲聊', subject: '乙：哈哈', sample: '{"reply":false}' });
+    const rows = auxDecisions({ limit: 5 });
+    // 新的在前：面板就是按这个顺序从上往下画的。
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].verdict, '不接');
+    assert.equal(rows[0].reason, '群友之间闲聊');
+    assert.equal(rows[0].sample, '{"reply":false}');
+    assert.equal(rows[0].subject, '乙：哈哈');
+    assert.equal(rows[1].kind, 'rule');
+    // 健康度只认真的模型调用：否则"成功率"会被一堆规则裁决稀释成看不懂的数字。
+    const health = auxHealthSnapshot();
+    assert.equal(health.calls, 1);
+    assert.equal(health.successRate, 1);
+    assert.equal(health.ruleCalls, 1);
+    assert.deepEqual(auxDecisions({ label: 'heartbeat' }), []);
+  });
+
+  await test('参与决策把"为什么"写进判断流，而不只是加一个计数', async () => {
+    resetAuxHealth();
+    const llm = { async *stream() { yield { type: 'text-delta', text: '{"reply":false,"reason":"群友之间闲聊"}' }; } };
+    const r = make({ replyDecisionEnabled: true }, llm);
+    const verdict = await decideReply(r.ctx, r.config, r.registry.entry('group:10'),
+      [message(1, '废鱼')], { key: 'group:10' });
+    assert.equal(verdict.reply, false);
+    const row = auxDecisions({ limit: 1 })[0];
+    assert.equal(row.verdict, '不接');
+    assert.equal(row.reason, '群友之间闲聊');
+    assert.match(row.subject, /废鱼/, '要能看出判的是哪句话，否则面板上只是个孤零零的"不接"');
+    assert.equal(row.conversation, 'group:10');
+    // 走完整注意力闸门：判断流有记录，stats 上的比例计数也得照旧 +1（页面顶部读它）。
+    const attention = await evaluateAttention(r.ctx, r.config, r.registry.entry('group:10'),
+      message(2, '废鱼'), r.stats, r.state.controller.signal, { key: 'group:10' });
+    assert.equal(attention.speak, false);
+    assert.equal(r.stats.replyDecisionChecks, 1);
+    assert.equal(r.stats.replyDecisionSilent, 1);
+    assert.equal(auxDecisions({ label: 'reply-decision' }).filter((item) => item.kind === 'model').length, 2);
+  });
+
 
   await test('aux health groups by call site and flags degradation under 80%', () => {
     resetAuxHealth();

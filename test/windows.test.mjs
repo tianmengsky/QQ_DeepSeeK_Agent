@@ -86,7 +86,9 @@ try {
     const out = r.call({ action: 'mine' });
     assert.equal(out.status, 'MINE');
     assert.match(out.text, /我下周陪你们下/);
-    assert.doesNotMatch(out.text, /另一个群在约五子棋/);
+    // 别人的话只能以「上文」的形式出现，不能被当成她自己的发言行。
+    assert.doesNotMatch(out.text, /\n {2}\d{2}-\d{2} \d{2}:\d{2} 甲：另一个群在约五子棋/u);
+    assert.match(out.text, /‹上文›.*另一个群在约五子棋/u);
   });
 
   await test('search 跨窗口找关键词，不越白名单', () => {
@@ -96,6 +98,55 @@ try {
     assert.match(hit.text, /棋友群/);
     const miss = r.call({ action: 'search', query: '不该被看到', days: 1 });
     assert.equal(miss.status, 'EMPTY');
+  });
+  await test('search 可以只搜她自己说过的话（speaker=me）', () => {
+    const r = rig(); r.seed();
+    const me = r.call({ action: 'search', query: '下周', days: 1, speaker: 'me' });
+    assert.equal(me.status, 'SEARCH');
+    assert.match(me.text, /我下周陪你们下/);
+    const them = r.call({ action: 'search', query: '下周', days: 1, speaker: 'them' });
+    assert.equal(them.status, 'EMPTY');
+    // 别人说的那句只出现在 them 里
+    const asked = r.call({ action: 'search', query: '五子棋', days: 1, speaker: 'me' });
+    assert.equal(asked.status, 'EMPTY');
+    assert.match(r.call({ action: 'search', query: '五子棋', days: 1, speaker: 'them' }).text, /另一个群在约五子棋/);
+  });
+
+  await test('mine 带 query 只回某件事，搜不到就说没有', () => {
+    const r = rig(); r.seed();
+    const hit = r.call({ action: 'mine', query: '下周' });
+    assert.equal(hit.status, 'MINE');
+    assert.match(hit.text, /我下周陪你们下/);
+    const miss = r.call({ action: 'mine', query: '五子棋' });
+    assert.equal(miss.status, 'EMPTY');
+    assert.match(miss.note, /五子棋/);
+  });
+
+  await test('read 带 query 只回命中行和前后各一条，不必整窗倒出来', () => {
+    const r = rig(); r.seed();
+    const alias = /- (w\d+) 群「棋友群」/u.exec(r.call({ action: 'list' }).text)?.[1];
+    const out = r.call({ action: 'read', conversation: alias, query: '五子棋' });
+    assert.equal(out.status, 'READ');
+    assert.match(out.text, /另一个群在约五子棋/);
+    assert.match(out.text, /我下周陪你们下/, '命中行后面那条（她的回应）应当作为上下文出现');
+    const miss = r.call({ action: 'read', conversation: alias, query: '这句话不存在' });
+    assert.equal(miss.status, 'EMPTY');
+  });
+
+  await test('search speaker=me 命中时带上紧挨着的上一句（当时问的是什么）', () => {
+    const r = rig(); r.seed();
+    const out = r.call({ action: 'search', query: '下周', days: 1, speaker: 'me' });
+    assert.equal(out.status, 'SEARCH');
+    assert.match(out.text, /我下周陪你们下/);
+    assert.match(out.text, /上文/, '应当带出上一句');
+    assert.match(out.text, /另一个群在约五子棋/, '上一句是别人问的什么');
+  });
+
+  await test('mine 带上下文但不重复她自己的话', () => {
+    const r = rig(); r.seed();
+    const out = r.call({ action: 'mine', query: '下周' });
+    assert.equal(out.status, 'MINE');
+    assert.match(out.text, /上文.*另一个群在约五子棋/u);
   });
 
   await test('白名单外的窗口读不到，编号也伪造不出来', () => {

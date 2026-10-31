@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>QQ 桥接控制台</title>
+<style>
+/* 和运维面板同一套宣纸/墨夜语汇，但这个页面是**独立进程**出来的：
+   桥接、DSH 全挂了它照样能开，因为启动它自己不需要任何别的东西在线。 */
+:root{
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --serif:"SimSun","Songti SC","Noto Serif CJK SC","Source Han Serif SC",serif;
+  --mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  --r-card:16px; --r-ctl:10px;
+}
+:root[data-theme=day]{
+  color-scheme:light;
+  --bg:#EFE7D8; --panel:#FBF6EA; --panel2:#F3EAD9; --panel3:#EADFC9;
+  --line:#DED0B7; --line2:#BCA886; --text:#2C2416; --muted:#6C5E4C; --dim:#94856E;
+  --err:#C4442F; --warn:#A8701A; --ok:#4B7F4A; --info:#26619C; --accent:#C44E3A; --gold:#D4A84B;
+  --tint-err:rgba(196,68,47,.10); --tint-warn:rgba(212,168,75,.20);
+  --tint-ok:rgba(91,140,90,.12); --tint-info:rgba(38,97,156,.09);
+  --shadow:0 1px 2px rgba(74,63,50,.10),0 8px 20px -14px rgba(74,63,50,.45);
+  --paper:radial-gradient(ellipse at 16% 8%, rgba(139,125,107,.09), transparent 54%),
+          radial-gradient(ellipse at 84% 82%, rgba(139,125,107,.07), transparent 56%);
+}
+:root[data-theme=night]{
+  color-scheme:dark;
+  --bg:#15191F; --panel:#1C2129; --panel2:#232932; --panel3:#2A313C;
+  --line:#333B47; --line2:#4A5464; --text:#E8E0D1; --muted:#A2967F; --dim:#7A7161;
+  --err:#E27A66; --warn:#E0B45C; --ok:#7FB37C; --info:#7FAFDA; --accent:#D9614A; --gold:#E0B45C;
+  --tint-err:rgba(217,97,74,.15); --tint-warn:rgba(224,180,92,.14);
+  --tint-ok:rgba(127,179,124,.13); --tint-info:rgba(127,175,218,.13);
+  --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 24px -18px rgba(0,0,0,.8);
+  --paper:radial-gradient(ellipse at 16% 8%, rgba(224,180,92,.05), transparent 56%),
+          radial-gradient(ellipse at 84% 82%, rgba(127,175,218,.05), transparent 58%);
+}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background-color:var(--bg);background-image:var(--paper);
+  background-attachment:fixed;color:var(--text);font:13.5px/1.6 var(--sans);
+  -webkit-font-smoothing:antialiased}
+::selection{background:var(--gold);color:#2C2416}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:var(--line2);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)} .dim{color:var(--dim)}
+
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px 24px}
+.brand{display:flex;align-items:center;gap:10px}
+.seal{width:30px;height:30px;display:grid;place-items:center;border-radius:8px;background:var(--accent);
+  color:#FBF4E6;font-family:var(--serif);font-size:16px;font-weight:700}
+.brand h1{margin:0;font-family:var(--serif);font-size:17px;letter-spacing:.05em}
+.brand .sub{font-size:11.5px;color:var(--dim);letter-spacing:.02em}
+.spacer{flex:1}
+button{font:inherit;font-size:12.5px;padding:5px 12px;border-radius:var(--r-ctl);cursor:pointer;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--text);transition:background .12s}
+button:hover:not(:disabled){background:var(--panel3)}
+button:disabled{opacity:.42;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#FBF4E6;font-weight:600}
+button.primary:hover:not(:disabled){filter:brightness(1.08)}
+button.ghost{background:transparent}
+button.small{padding:3px 9px;font-size:11.5px}
+label.chk{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer}
+label.chk input{accent-color:var(--accent);width:13px;height:13px;margin:0}
+
+main{max-width:1180px;margin:0 auto;padding:4px 24px 60px;display:grid;gap:14px}
+.cards{display:grid;gap:14px;grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:900px){.cards{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);
+  box-shadow:var(--shadow);padding:16px 18px 14px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.card[data-tone=ok]{border-color:color-mix(in srgb,var(--ok) 55%,var(--line))}
+.card[data-tone=warn]{border-color:color-mix(in srgb,var(--gold) 55%,var(--line))}
+.card[data-tone=err]{border-color:color-mix(in srgb,var(--err) 50%,var(--line))}
+.card-head{display:flex;align-items:center;gap:9px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--dim);flex:none}
+.card[data-tone=ok] .dot{background:var(--ok);box-shadow:0 0 0 3px var(--tint-ok)}
+.card[data-tone=warn] .dot{background:var(--gold);box-shadow:0 0 0 3px var(--tint-warn)}
+.card[data-tone=err] .dot{background:var(--err);box-shadow:0 0 0 3px var(--tint-err)}
+.card-name{font-family:var(--serif);font-size:14px;font-weight:700;letter-spacing:.06em}
+.card-tag{margin-left:auto;font-size:10.5px;color:var(--dim);font-family:var(--mono)}
+.state{font-size:15px;font-family:var(--serif);font-weight:700;letter-spacing:.02em}
+.card[data-tone=ok] .state{color:var(--ok)}
+.card[data-tone=warn] .state{color:var(--warn)}
+.card[data-tone=err] .state{color:var(--err)}
+.facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:12.5px;margin:0}
+.facts dt{color:var(--dim);white-space:nowrap}
+.facts dd{margin:0;color:var(--text);overflow-wrap:anywhere;font-family:var(--mono);font-size:12px}
+.hint{font-size:11.5px;color:var(--dim);line-height:1.5;min-height:1.5em}
+.hint[data-bad=true]{color:var(--err)}
+.acts{display:flex;flex-wrap:wrap;gap:7px;margin-top:auto}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);overflow:hidden}
+.panel-head{display:flex;align-items:center;gap:9px;padding:10px 16px;border-bottom:1px solid var(--line);
+  font-family:var(--serif);font-size:13px;font-weight:700;letter-spacing:.05em}
+.panel-head::before{content:"";width:7px;height:7px;border-radius:2px;background:var(--accent);transform:rotate(45deg)}
+.panel-head .muted{font-family:var(--sans);font-weight:400;font-size:11.5px}
+#log{max-height:min(46vh,340px);overflow:auto;padding:10px 16px;font-family:var(--mono);font-size:11.5px;
+  line-height:1.75;display:grid;gap:1px;align-content:start}
+#log .row{display:grid;grid-template-columns:66px minmax(0,1fr);gap:10px}
+#log .at{color:var(--dim)}
+#log .text{color:var(--text);overflow-wrap:anywhere;white-space:pre-wrap}
+#log .row[data-tone=ok] .text{color:var(--ok)}
+#log .row[data-tone=bad] .text{color:var(--err)}
+#log .row[data-tone=title] .text{color:var(--text);font-weight:600}
+#log .empty{color:var(--dim);font-family:var(--sans);font-size:12px}
+.note{padding:12px 16px;font-size:12px;color:var(--dim);line-height:1.7}
+.note code{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.busy{display:inline-flex;align-items:center;gap:6px;color:var(--gold);font-size:11.5px}
+/* [hidden] 是 UA 样式，压不过上面的 display:inline-flex —— 不写这条，任务结束后"执行中"会一直挂着。 */
+.busy[hidden]{display:none}
+.busy::before{content:"";width:8px;height:8px;border-radius:50%;border:1.5px solid var(--gold);
+  border-top-color:transparent;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+<script>
+(function () {
+  var saved = null;
+  var forced = new URLSearchParams(location.search).get('theme');
+  try { saved = localStorage.getItem('qq-console-theme'); } catch (e) { saved = null; }
+  var pick = forced === 'day' || forced === 'night' ? forced
+    : saved === 'day' || saved === 'night' ? saved
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'day' : 'night');
+  document.documentElement.dataset.theme = pick;
+})();
+</script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="seal">控</span>
+    <div>
+      <h1>QQ 桥接控制台</h1>
+      <div class="sub" id="sub">独立进程 · DSH、接入端、桥接全挂了也能打开</div>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <span class="busy" id="busy" hidden>执行中</span>
+  <label class="chk"><input type="checkbox" id="auto" checked> 自动刷新</label>
+  <button id="theme" title="切换昼夜">夜</button>
+  <button class="ghost" id="refresh">刷新</button>
+  <button class="primary" id="start-all">一键启动全部</button>
+</header>
+
+<main>
+  <div class="cards">
+    <section class="card" id="card-dsh" data-tone="idle">
+      <div class="card-head"><span class="dot"></span><span class="card-name">DSH</span>
+        <span class="card-tag">宿主</span></div>
+      <div class="state" id="dsh-state">探测中…</div>
+      <dl class="facts" id="dsh-facts"></dl>
+      <div class="hint" id="dsh-hint"></div>
+      <div class="acts">
+        <button id="dsh-start">启动 DSH</button>
+        <button class="ghost" id="dsh-open" disabled>打开 DSH</button>
+      </div>
+    </section>
+
+    <section class="card" id="card-snow" data-tone="idle">
+      <div class="card-head"><span class="dot"></span><span class="card-name">SnowLuma</span>
+        <span class="card-tag">QQ 接入</span></div>
+      <div class="state" id="snow-state">探测中…</div>
+      <dl class="facts" id="snow-facts"></dl>
+      <div class="hint" id="snow-hint"></div>
+      <div class="acts">
+        <button id="snow-start">启动接入</button>
+      </div>
+    </section>
+
+    <section class="card" id="card-bridge" data-tone="idle">
+      <div class="card-head"><span class="dot"></span><span class="card-name">桥接</span>
+        <span class="card-tag">插件</span></div>
+      <div class="state" id="bridge-state">探测中…</div>
+      <dl class="facts" id="bridge-facts"></dl>
+      <div class="hint" id="bridge-hint"></div>
+      <div class="acts">
+        <button class="primary" id="bridge-panel" disabled>打开面板</button>
+        <button id="bridge-hosting" disabled>开/关托管</button>
+        <button class="ghost" id="bridge-restart" disabled>重置托管</button>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head">日志 <span class="muted" id="log-hint">启动过程会实时写在这里</span></div>
+    <div id="log"><div class="empty">还没有动作 —— 上面按哪个按钮，这里就记它干了什么。</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">这个页面是什么</div>
+    <div class="note">
+      它是 <code>tools/console.mjs</code> 起的一个独立小服务（默认 <code>127.0.0.1:7788</code>，只监听本机），
+      不挂在 DSH 上，所以桥接挂掉、DSH 关掉，这个页面照样能开——这正是运维面板做不到的。<br>
+      启动顺序是硬性的：<b>DSH → 桥接插件 → SnowLuma 与托管</b>。接入端要往桥接上报群消息，
+      桥接没起来就先启动接入，只会把上报地址写成旧端口，消息全部丢失。<br>
+      接入一律交给 <code>tools/start-qq-mcp.ps1</code>（互斥锁、复用在线账号、同步上报地址都在那里），
+      这里只负责顺序、超时和把日志搬给你看。
+    </div>
+  </section>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const state = { data: null, timer: 0, auto: true };
+
+const THEME_KEY = 'qq-console-theme';
+
+function applyTheme() {
+  const theme = document.documentElement.dataset.theme === 'day' ? 'day' : 'night';
+  $('theme').textContent = theme === 'day' ? '昼' : '夜';
+}
+$('theme').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'day' ? 'night' : 'day';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* 隐私模式 */ }
+  applyTheme();
+});
+
+const clock = (value) => new Date(value).toLocaleTimeString('zh-CN', { hour12: false });
+const short = (value) => (value == null || value === '' ? '—' : String(value));
+
+function facts(id, pairs) {
+  const node = $(id);
+  node.replaceChildren(...pairs.filter(Boolean).flatMap(([key, value]) => {
+    const dt = document.createElement('dt');
+    dt.textContent = key;
+    const dd = document.createElement('dd');
+    if (value instanceof Node) dd.append(value); else dd.textContent = short(value);
+    return [dt, dd];
+  }));
+}
+
+function render(d) {
+  // —— DSH ——
+  const dsh = d.dsh ?? {};
+  const ports = (dsh.ports ?? []).join('、');
+  if (dsh.running) {
+    $('card-dsh').dataset.tone = ports ? 'ok' : 'warn';
+    $('dsh-state').textContent = ports ? '运行中' : '运行中（还没监听）';
+  } else {
+    $('card-dsh').dataset.tone = 'err';
+    $('dsh-state').textContent = '没有在跑';
+  }
+  facts('dsh-facts', [
+    ['端口', ports || '—'],
+    ['进程', (dsh.pids ?? []).length ? `${dsh.pids.length} 个` : '—'],
+  ]);
+  $('dsh-hint').textContent = dsh.running
+    ? (d.bridge?.up ? '' : 'DSH 在跑，但 /qq/onebot 没响应 —— 插件可能没加载')
+    : '点「启动 DSH」把它拉起来，桥接跟着它一起上线';
+  $('dsh-hint').dataset.bad = String(dsh.running && !d.bridge?.up);
+  $('dsh-start').disabled = Boolean(dsh.running) || d.job?.running === true;
+  $('dsh-open').disabled = !dsh.url;
+  $('dsh-open').onclick = () => dsh.url && window.open(dsh.url, '_blank', 'noopener');
+
+  // —— SnowLuma ——
+  const snow = d.snow ?? {};
+  const tone = snow.online ? 'ok' : snow.listening ? 'warn' : 'err';
+  $('card-snow').dataset.tone = tone;
+  $('snow-state').textContent = snow.online ? '在线'
+    : snow.listening ? '接口在，账号没就绪' : '没有在跑';
+  facts('snow-facts', [
+    ['账号', snow.nickname ? `${snow.nickname}（${snow.account ?? '?'}）` : (snow.account ?? '—')],
+    ['接口', snow.port ? `127.0.0.1:${snow.port}` : '—'],
+  ]);
+  const snowHint = snow.online ? ''
+    : !d.bridge?.up ? '桥接没起来，先启动 DSH —— 顺序反了会把上报地址写成旧端口'
+    : snow.error || '点「启动接入」拉起 SnowLuma 并打开托管';
+  $('snow-hint').textContent = snowHint;
+  $('snow-hint').dataset.bad = String(Boolean(snow.listening && !snow.online && snow.error));
+  $('snow-start').disabled = !d.bridge?.up || d.job?.running === true;
+
+  // —— 桥接 ——
+  const bridge = d.bridge ?? {};
+  $('card-bridge').dataset.tone = bridge.up ? 'ok' : (dsh.running ? 'warn' : 'err');
+  $('bridge-state').textContent = bridge.up
+    ? `在线 ${bridge.build ? '· ' + bridge.build : ''}` : (dsh.running ? '没挂上' : '没有在跑');
+  facts('bridge-facts', [
+    ['托管', bridge.up ? (bridge.agentEnabled ? '开' : '关') : '—'],
+    ['会话', bridge.up ? short(bridge.conversations) : '—'],
+    ['地址', bridge.url ? bridge.url.replace(/^https?:\/\//, '') : '—'],
+  ]);
+  const bridgeHint = !bridge.up ? (dsh.running ? 'DSH 在跑但插件没响应，检查插件是否加载' : '需要先启动 DSH')
+    : bridge.unauthorized ? '有响应但要 token：设 QQ_PANEL_TOKEN 后重启控制台'
+    : bridge.lastError ? '最近错误：' + bridge.lastError : '';
+  $('bridge-hint').textContent = bridgeHint;
+  $('bridge-hint').dataset.bad = String(Boolean(bridge.up && bridge.lastError));
+  $('bridge-panel').disabled = !bridge.panelUrl;
+  $('bridge-panel').onclick = () => bridge.panelUrl && window.open(bridge.panelUrl, '_blank', 'noopener');
+  $('bridge-hosting').disabled = !bridge.up || d.job?.running === true;
+  $('bridge-hosting').textContent = bridge.up && bridge.agentEnabled ? '关闭托管' : '开启托管';
+  $('bridge-restart').disabled = !bridge.up || d.job?.running === true;
+
+  // —— 顶栏与日志 ——
+  $('sub').textContent = `独立进程 · 127.0.0.1:${d.console?.port ?? '?'} · ${clock(d.now)} 更新`;
+  const running = d.job?.running === true;
+  $('busy').hidden = !running;
+  $('start-all').disabled = running;
+  $('start-all').textContent = running ? '正在执行…' : '一键启动全部';
+  renderLog(d.job);
+}
+
+function renderLog(job) {
+  const box = $('log');
+  if (!job || !job.lines?.length) {
+    if (!box.querySelector('.empty')) {
+      box.replaceChildren(Object.assign(document.createElement('div'),
+        { className: 'empty', textContent: '还没有动作 —— 上面按哪个按钮，这里就记它干了什么。' }));
+    }
+    $('log-hint').textContent = '启动过程会实时写在这里';
+    return;
+  }
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.replaceChildren(...job.lines.map((line) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.dataset.tone = line.tone ?? 'info';
+    const at = document.createElement('span');
+    at.className = 'at';
+    at.textContent = clock(line.at);
+    const text = document.createElement('span');
+    text.className = 'text';
+    text.textContent = line.text;
+    row.append(at, text);
+    return row;
+  }));
+  $('log-hint').textContent = `${job.label} · ${job.running ? '进行中' : (job.ok ? '完成' : '失败')}`;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function refresh() {
+  try {
+    const response = await fetch('/api/status', { cache: 'no-store' });
+    state.data = await response.json();
+    render(state.data);
+  } catch (error) {
+    $('sub').textContent = '控制台自己出问题了：' + (error?.message ?? error);
+  }
+  schedule();
+}
+
+function schedule() {
+  clearTimeout(state.timer);
+  if (!state.auto) return;
+  const busy = state.data?.job?.running === true;
+  state.timer = setTimeout(refresh, busy ? 1200 : 4000);
+}
+
+async function act(name, extra = {}) {
+  try {
+    const response = await fetch('/api/action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, ...extra }),
+    });
+    const result = await response.json();
+    if (!result.ok) { alert(result.error ?? '动作失败'); return; }
+    if (result.job) {
+      state.data = { ...(state.data ?? {}), job: result.job };
+      render(state.data);
+    }
+  } catch (error) {
+    alert('请求失败：' + (error?.message ?? error));
+  }
+  refresh();
+}
+
+$('start-all').onclick = () => act('startAll');
+$('dsh-start').onclick = () => act('startDsh');
+$('snow-start').onclick = () => act('startAccess');
+$('bridge-restart').onclick = () => act('restartHosting');
+$('bridge-hosting').onclick = () => act('hosting', { enabled: !state.data?.bridge?.agentEnabled });
+$('refresh').onclick = refresh;
+$('auto').addEventListener('change', (event) => {
+  state.auto = event.target.checked;
+  schedule();
+});
+
+applyTheme();
+refresh();
+</script>
+</body>
+</html>
