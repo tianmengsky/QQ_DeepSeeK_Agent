@@ -18,6 +18,7 @@ import { MemoryStore } from '../lib/memory/memory-store.mjs';
 import {
   ProactiveHost,
   PROACTIVE_STATE_KEY,
+  proactiveSnapshot,
   frequencyFactor,
   jitteredDelay,
   engagementOf,
@@ -119,6 +120,7 @@ function setup({ settings = {}, llm = fakeLlm({ action: 'none', why: '现在没�
     users: ['200'],
     onebotHttp: 'http://127.0.0.1:2112',
     proactiveEnabled: true,
+    proactiveMode: 'prompt',
     proactiveIntervalMs: 3600000,
     proactiveJitterPct: 0.4,
     proactiveQuietHours: 8,
@@ -345,6 +347,116 @@ try {
     const found = await s.host.candidates({ now: Date.now() });
     assert.deepEqual(found.speak.map((x) => x.key), ['user:200']);
   });
+
+  /**
+   * 面板要回答"她怎么不主动找我"，靠的就是这一组排除原因。
+   * 少了它，`action: none` 和"钟根本没走"在读数上一模一样。
+   */
+  await test('候选被筛掉的原因要留下来，够安静的才进候选', async () => {
+    const s = setup({ settings: { groups: ['10', '11', '12'] } });
+    quietFor(s.store, 'group:10', 30);   // 够安静 → 唯一进候选的
+    quietFor(s.store, 'group:11', 1);    // 刚聊过 → quiet
+    quietFor(s.store, 'user:200', 30);   // 安静，但今天已经主动过 → budget
+    quietFor(s.store, 'group:12', 40);   // 安静，但在她这儿一直没人接 → learn-stopped
+
+    s.store.recordProactive({ conversation: 'user:200', kind: 'speak', trigger: 'test', text: '早' });
+    // group:12 的三次都是"发了没人接"，且都要放到今天之前，否则先被日额度挡住。
+    for (let i = 0; i < 3; i++) {
+      const id = s.store.recordProactive({ conversation: 'group:12', kind: 'speak', trigger: 'test', text: '嗯' });
+      s.store.finishProactiveCheck(id, 'quiet');
+    }
+    s.store.db.prepare('UPDATE proactive SET created_at = ? WHERE conversation = ?')
+      .run(Date.now() - 3 * 86400000, 'group:12');
+
+    const now = Date.now();
+    const { speak } = await s.host.candidates({ now });
+    assert.deepEqual(speak.map((item) => item.key), ['group:10'], '够安静的才是候选');
+
+    const seen = s.host.lastCandidates;
+    assert.equal(seen.considered >= 4, true);
+    assert.deepEqual(seen.picked.map((item) => item.key), ['group:10']);
+    assert.ok(seen.skippedCounts.quiet >= 1, '刚聊过的要记成 quiet');
+    assert.ok(seen.skippedCounts.budget >= 1, '今天已发过的要记成 budget');
+    assert.ok(seen.skippedCounts['learn-stopped'] >= 1, '没人接导致停手要单独记');
+    assert.equal(typeof seen.at, 'number');
+    // 每个被筛的窗口都要说得出是哪个、为什么。
+    assert.ok(seen.skipped.every((item) => typeof item.key === 'string' && typeof item.reason === 'string'));
+  });
+
+  await test('主动层快照：钟、今日账、频率学习、候选都读得到', async () => {
+    const s = setup();
+    quietFor(s.store, 'group:10', 10);
+    const now = Date.now();
+    await s.host.candidates({ now });
+    const id = s.store.recordProactive({ conversation: 'group:10', kind: 'speak', trigger: 'test', text: '早' });
+    s.store.finishProactiveCheck(id, 'replied');
+    s.host.runtime.nextAt = now + 20 * 60000;
+    s.stats.proactiveTicks = 5;
+
+    const snap = proactiveSnapshot({ host: s.host, store: s.store, config: s.cfg, stats: s.stats, now });
+    assert.equal(snap.enabled, true);
+    assert.equal(snap.clock.due, false, '还没到点：这就是"不是她不理你"的答案');
+    assert.ok(snap.clock.waitMs >= 19 * 60000);
+    assert.equal(snap.counts.ticks, 5);
+    assert.equal(snap.today.sent, 1);
+    assert.equal(snap.today.replied, 1);
+    assert.equal(snap.today.checking, 0);
+    assert.equal(snap.learn[0].conversation, 'group:10');
+    assert.equal(snap.learn[0].answered, 1);
+    assert.equal(snap.recent[0].outcome, 'replied');
+    assert.equal(snap.candidates, s.host.lastCandidates, '快照里的候选就是上一轮真正算出来的那份');
+  });
+
+  await test('主动开口在判断流里有中文名，不是裸的英文键', async () => {
+    const { AUX_LABELS } = await import('../lib/agent/aux-attribution.mjs');
+    assert.equal(AUX_LABELS.proactive, '主动开口');
+  });
+  await test('真回合模式：睡着的时候不醒，也不花一次调用', async () => {
+    const hour = new Date().getHours();
+    const s = setup({ settings: { proactiveMode: 'turn', proactiveSleepFrom: hour, proactiveSleepTo: (hour + 1) % 24 } });
+    quietFor(s.store, 'group:10', 10);
+    const result = await s.host.tick({ now: Date.now(), force: true });
+    assert.equal(result.ran, false);
+    assert.equal(result.reason, 'sleep');
+    assert.equal(s.proactive().length, 0);
+  });
+
+  await test('真回合模式：今天的次数用完了就不醒', async () => {
+    const s = setup({ settings: { proactiveMode: 'turn', proactiveDailyMax: 1 } });
+    quietFor(s.store, 'group:10', 10);
+    s.store.recordProactive({ conversation: 'group:10', kind: 'turn', trigger: 'self-time', idemKey: 'x:1' });
+    const result = await s.host.tick({ now: Date.now(), force: true });
+    assert.equal(result.reason, 'daily-budget');
+    assert.equal(s.proactive().length, 1, '不该再记一条');
+  });
+
+  await test('真回合模式：没有能待的窗口就什么都不做，不报错', async () => {
+    const s = setup({ settings: { proactiveMode: 'turn' } });
+    const result = await s.host.tick({ now: Date.now(), force: true });
+    assert.equal(result.reason, 'no-window');
+    assert.equal(s.stats.proactiveFailures ?? 0, 0);
+  });
+
+  /**
+   * 真回合的准入是这一层最容易悄悄坏掉的地方：合成事件的发送者就是她自己，
+   * 如果不带场景标记，`admitMessage` 会当成"她自己发的消息"拦掉，
+   * 于是每次醒来都"什么都没发生"，而且看不出报错。所以两头都钉住。
+   */
+  await test('真回合模式：场景标记放行，冒充她自己发的消息仍然拦掉', async () => {
+    const { admitMessage } = await import('../lib/domain/admission.mjs');
+    const cfg = config({ selfIds: ['999'], groupEnabled: true, groups: ['10'] });
+    const base = {
+      post_type: 'message',
+      message_type: 'group',
+      group_id: 10,
+      user_id: 999,
+      message_id: 'self-turn:1',
+      message: [{ type: 'text', data: { text: '[自主时间] 现在没有新消息。' } }],
+    };
+    assert.equal(admitMessage(cfg, { ...base, __selfTurn: true }), true, '场景标记要放行');
+    assert.equal(admitMessage(cfg, base), false, '她自己账号的正常消息不能当成新消息');
+  });
+
 } finally {
   globalThis.fetch = realFetch;
   for (const store of stores) {
