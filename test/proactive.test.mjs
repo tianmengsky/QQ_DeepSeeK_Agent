@@ -455,10 +455,67 @@ try {
 
   await test('真回合模式：没有能待的窗口就什么都不做，不报错', async () => {
     const daytime = new Date(2026, 9, 30, 15, 0).getTime();
-    const s = setup({ settings: { proactiveMode: 'turn' } });
+    // 关掉脊柱：这条测的是"借某个房间醒"的旧路径，脊柱要单独测。
+    const s = setup({ settings: { proactiveMode: 'turn', proactiveSpine: false } });
     const result = await s.host.tick({ now: daytime, force: true });
     assert.equal(result.reason, 'no-window');
     assert.equal(s.stats.proactiveFailures ?? 0, 0);
+  });
+
+  /**
+   * 脊柱：醒在"外面"（self:account），而不是借某个房间。
+   *
+   * 钉两件事：①到点真的去开一个**不属于任何房间**的会话（`self:account`），
+   * 而不是从候选里挑一个窗口；②这个会话自己建不出来时不抛错、记一次失败。
+   */
+  await test('脊柱模式：醒在自己的外面，不借任何房间', async () => {
+    const daytime = new Date(2026, 9, 30, 15, 0).getTime();
+    const opened = [];
+    const s = setup({ settings: { proactiveMode: 'turn', proactiveSpine: true } });
+    quietFor(s.store, 'group:10', 10, '有人吗', daytime);
+    s.host.registry = {
+      config: s.cfg,
+      ctx: s.ctx,
+      byKey: new Map(),
+      entry(key) {
+        if (!this.byKey.has(key)) this.byKey.set(key, { window: [], pending: [], awakeUntil: 0 });
+        return this.byKey.get(key);
+      },
+      async ensureSession(key) {
+        opened.push(key);
+        this.byKey.get(key).sessionId = 'session-spine';
+        return 'session-spine';
+      },
+      persist() {},
+      record(entry, item) { entry.window.push(item); },
+    };
+    s.host.state.selfTurnSessions = new Set();
+    const result = await s.host.tick({ now: daytime, force: true });
+    assert.equal(result.mode, 'spine');
+    assert.deepEqual(opened, ['self:account'], '应该打开她自己的那个会话');
+    assert.equal(s.host.state.selfTurnSessions.size, 0, '回合结束后要摘掉写权限');
+    assert.equal(s.stats.proactiveFailures ?? 0, 0);
+  });
+
+  await test('脊柱模式：开会话失败就记一次失败，不往外抛', async () => {
+    const daytime = new Date(2026, 9, 30, 15, 0).getTime();
+    const s = setup({ settings: { proactiveMode: 'turn', proactiveSpine: true } });
+    s.host.registry = {
+      config: s.cfg,
+      ctx: s.ctx,
+      byKey: new Map(),
+      entry(key) {
+        if (!this.byKey.has(key)) this.byKey.set(key, { window: [], pending: [], awakeUntil: 0 });
+        return this.byKey.get(key);
+      },
+      async ensureSession() { throw new Error('模型不可用'); },
+      persist() {},
+      record() {},
+    };
+    s.host.state.selfTurnSessions = new Set();
+    const result = await s.host.tick({ now: daytime, force: true });
+    assert.equal(result.reason, 'spine-session-failed');
+    assert.equal(s.stats.proactiveFailures, 1);
   });
 
   /**

@@ -1,4 +1,19 @@
+2026-11-01 版本号 `v128-mood-merge` → **`v129-spine`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+这一版动的是**决策点**，不是心情，也不是工具。之前她的"自己的时间"是在某个房间的会话里跑回合——她看得见那个群最近的消息，决定就被那个群带着走；"主动"缩成了"在某间屋子里发作"。更早一版把"在哪醒"改成随机挑窗口，那只是把病因挪了个位置：多脑的病，是一个决定仍然长在某间屋子里。
+
+- **醒在脊柱**：新增会话 `self:account`（`lib/application/proactive.mjs` 的 `#spineTick`），它不属于任何群、任何私聊。到点后她在那里醒来，看见的是 `buildWorldSnapshot()` 压出来的世界：各窗口最近的动静（安静多久、她最后一次说话是什么时候）、她最近自己做过的事、此刻的心情、她写下过的想法。房间里最近的消息**不再**喂进这个决定。
+- **说话靠点名**：她直接回话不会被投递到任何地方（`lib/application/execute-turn.mjs` 里 `__spine` 分支在投递前返回）；要跟谁说，就用 `qq_windows say, to=窗口编号`。这样"在哪决定"和"对谁说"第一次解耦了。
+- **`self:` 会话放行**：`lib/agent/workspace.mjs` 的会话 key 判断从 `^(group|user|bili):…$` 扩成允许 `self:<名字>`，并单独给它一个 workspace 目录；不这样放行，脊柱连会话都建不出来（`sessions.mjs:177` 拿 key 建 cwd）。
+- **判断她开口了没有**：`Store.countSelfMessages({since})` 数这段时间里 `kind='self_message'` 的事件——脊柱回合没有投递对象，不能再看回合正文。
+- 物理边界不变：睡觉 01:00–08:00、每天最多 4 次；`proactiveSpine: false` 可退回"借房间醒"，`proactiveMode: 'prompt'` 仍是旧菜单。
+- 测试：`proactive` 21 → 23（新增"脊柱模式：醒在自己的外面，不借任何房间"、"开会话失败就记一次失败，不往外抛"）；`world-snapshot` 4、`self-actions` 3 是它的输入面与足迹。`--fast` **1052 项通过**，只剩既有的 `lifecycle:untilChecked` 失败（干净 worktree 上同样失败）。
+- 没做：昼夜节律、`intent`（"将来"）、脊柱自己的会话轮换策略——现在它和普通会话共用一套轮换。
+
+为什么该升：`/status` 的 `memory.proactive.mode` 会从 `turn` 变成 `spine`，它决定"决定发生在哪儿"，这是这一批里唯一会改变线上行为的东西。
+
 2026-11-01 版本号 `v127-single-author` → **`v128-mood-merge`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
 
 用户戳破的一个漏洞：天气是**全局**的，但写它的日结一次只看得见**一间屋子**，同一天几个群"后写的覆盖前面的"——那等于谁最后写，她就带着谁的心情过夜；另一边刚被夸、这边刚被冷落的差异被整段丢掉。这不是"覆盖丢信息"的问题（人本来也只能带一种心情），是**署名者的视野太窄**。
 
