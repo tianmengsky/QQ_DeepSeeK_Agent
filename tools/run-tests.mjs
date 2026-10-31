@@ -39,6 +39,7 @@ const suites = [
   'mood',
   'self-actions',
   'world-snapshot',
+  'intent',
   'reconcile',
   'introspect',
   'windows',
