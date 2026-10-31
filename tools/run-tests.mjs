@@ -59,6 +59,7 @@ const suites = [
   'tool-scope',
   'workspace',
   'task-routing',
+  'task-reaper',
   'subagent-results',
   'aux-health',
   'json-output',

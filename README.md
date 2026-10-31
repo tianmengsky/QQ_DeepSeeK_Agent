@@ -1,3 +1,15 @@
+2026-11-01 版本号 `v132-intent-age` → **`v133-task-reaper`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+线上 `/status` 的 `tasks.running` 长期显示 3，但那是假的：`bridge_tasks` 里最老的 `running` 已经放了**十一天**。桥接被杀、HMR 重载、模型链路断在半路——结算那一步不会再发生，任务就永远挂在"执行中"。
+
+- 新文件 `lib/conversation/task-reaper.mjs`：`reapAbandonedTasks({ store, config, now })`——`running` 超过 `taskAbandonHours`（默认 12h）→ `recovering`（"待核对，不能说仍在做"）；`recovering` 超过 `taskGiveUpDays`（默认 7 天）→ `failed`（"没有回执，不能算做完"）。**只改说法，不删数据**，每条都写清为什么被改写。
+- `lib/bootstrap.mjs`：开机时收殓一次（不是定时器——这件事只在启动时才有意义），有改写就 `logger.warn` 一行。
+- `lib/config.mjs`：新增 `taskAbandonHours: 12`、`taskGiveUpDays: 7`。
+- 为什么不直接判 `failed`：`recovering` 是账本里已有的语义（"需要核对"），直接判死会把"可能真做了一半"的一起丢掉；但 `recovering` 放太久也该收场。
+- 测试：新增 `task-reaper` **5 项**（超时改写并写理由 / 时限内不动 / recovering 收场但不删 / 时限内 recovering 不动 / 库不可用不抛）；`--fast` 1070 项通过，只剩既有 `lifecycle:untilChecked`。
+
+为什么该升：`/status` 上 `tasks.running` 会从"永远 3"回到真实值——这是用户能直接看见的差别，也是"她正在做"这句话重新可信的前提。
+
 2026-11-01 版本号 `v131-self-record` → **`v132-intent-age`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 上一版让"欠着的事"能被看见。这一版处理它放久了会变成什么：**不自动清、不替她判过期，只把那件事已经放了多久说出来**。
