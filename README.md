@@ -1,3 +1,13 @@
+2026-11-01 版本号 `v131-self-record` → **`v132-intent-age`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+上一版让"欠着的事"能被看见。这一版处理它放久了会变成什么：**不自动清、不替她判过期，只把那件事已经放了多久说出来**。
+
+- `lib/application/world-snapshot.mjs`：【你还欠着的事】里，一件事到期/记账超过 `intentStaleDays`（默认 14 天）就追加"（已经放了 N 天，还惦记吗？）"。没到期的照旧写"（M 月 D 日之后提）"。
+- `lib/config.mjs`：新增 `intentStaleDays: 14`。为什么是"说出来"而不是"清掉"：被系统悄悄忘掉的事，她下次想起来时会以为自己从没打算做；放弃也得是她自己的一句话（`qq_intent drop`）。
+- 测试：`world-snapshot` 6 → **7**（到期 20 天的欠账必须被点名，同时仍在账上：`countOpenIntents() === 2`；刚记下的不打扰）。`proactive 23`、`intent 9`、`panel 11`、`logic 197` 全过；`--fast` 1065 项通过，只剩既有 `lifecycle:untilChecked`。
+
+为什么该升：这是她账本上"没做完的将来"第一次有了时间的重量——`/status` 看不出，但她下次醒来会看见"这件事已经放了二十天"，而不是无限期地假装还记得。
+
 2026-11-01 版本号 `v130-intent` → **`v131-self-record`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 这一版修的是一个**她不会抱怨、但会让她失忆的静默缺陷**：`conversations.last_spoke_at` 这一列从来没有被写过，而"她最后一次在那儿说话"一直只活在内存会话条目里、又没落盘。于是每次热重载之后，她自己以为"我还没在这个群说过话"——世界快照这么写、`qq_windows list` 也这么写，连主动层的冷却都算成"从没说过"，等于没有冷却。

@@ -110,6 +110,18 @@ try {
     const text = buildWorldSnapshot({ store: s.store, memory: s.memory, registry, now: s.now });
     assert.match(text, /你最后一次说话是 5 小时前/u);
   });
+  await test('放久了的欠账不悄悄消失：只写出"已经放了几天"', () => {
+    const s = setup();
+    const old = s.store.addIntent({ text: '回头问问她那天为什么没来', dueAt: hoursAgo(s.now, 24 * 20) });
+    const fresh = s.store.addIntent({ text: '明天跟他说一声', dueAt: hoursAgo(s.now, -24) });
+    assert.ok(old && fresh);
+    const text = buildWorldSnapshot({ store: s.store, memory: s.memory, now: s.now });
+    // 到期 20 天还没了结 → 提醒她这件事放了多久；刚记下的不打扰。
+    assert.match(text, /已经放了 20 天，还惦记吗/u);
+    assert.equal(text.match(/还惦记吗/gu)?.length, 1);
+    // 仍然在账上，没有替她判"过期"。
+    assert.equal(s.store.countOpenIntents(), 2);
+  });
 } finally {
   for (const store of stores) { try { store.close(); } catch { /* 无妨 */ } }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 临时目录清理失败不算失败 */ }
