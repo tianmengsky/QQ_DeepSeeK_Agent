@@ -39,6 +39,7 @@ const suites = [
   'reconcile',
   'introspect',
   'windows',
+  'proactive',
   'notebook-projection',
   'lifecycle',
   'launcher',

@@ -1,3 +1,23 @@
+2026-10-31 版本号 `v120-panel-judgement` → **`v121-proactive`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："我希望她可以实现主动找人聊天，主动去刷b站并分享有趣的视频给群里。并且她会学习，如果她判断这个人或这个群对她的内容不感兴趣，她会减少频率直到不和这个人或群主动交互。时钟频率大概每小时一次，间隔不固定。"
+
+这一版的中心问题不是"加一个定时器"，而是**"谁在决定要不要开口"**：之前她的宿主是消息流——有人说话她才存在，能决定怎么回、不能决定要不要开场。现在多了一个不被消息触发的决策点。
+
+改了什么：
+
+- **`lib/application/proactive.mjs`（新，约 480 行）**：一个钟 + 一本账 + 一次决定，不是第二个 AI。钟每 5 分钟看一次表，到点（约 1 小时 ±40% 抖动，`jitteredDelay()`）才醒；醒一次做四件事：结算上一批（15 分钟窗口内有没有人接）→ 排下一轮 → 收集候选 → 一次短模型调用（`maxTokens: 500`）→ 执行。**`none` 是默认答案**，提示词里明写"大多数时候应该是 none，你不是在完成'每小时说一句'的任务"。
+- **候选由账本挑，不由模型自由发挥**：窗口必须安静 ≥ `proactiveQuietHours`（8 小时）、离她上次发言 ≥ `proactiveCooldownMs`、今天还没主动过、**而且回应率不为 0**；模型只能从这几个窗口里选一个。视频短名单同理，`pick` 越界一律降级成 `none`。
+- **不唤醒子窗口生成**：那句话由宿主写，写完作为 `self_message` 写回目标窗口的 `events`，同时 `recordContext` + `wakeAfterSpeech` —— 下次那个窗口醒来，"你：……"是它自己的历史，@ 回复也接得上。把它派给群窗口生成，会让上下文里别人的话把她压成"回答"，而且贵。
+- **窗口在忙就退让**：有未读（`entry.pending`）、或 60 秒清醒窗口还开着（`awakeUntil`）就不发。锁只在"发送 + 记账"那几十毫秒里持有，**决策不持锁**——否则她思考的 8 秒会把群消息全卡在队列里。
+- **学习是真的会停**：`frequencyFactor()` 看这个会话最近 6 次主动发言的回应率——≥50% 照常、≥20% 减半、更低四分之一、**一次都没有就 0（不再主动）**。结果落 `proactive` 表活过重载；`proactiveProbeDays`（默认 0 = 不探）想给关系留翻身机会的人可以填 30。
+- **`lib/application/bili-feed.mjs`（新，约 165 行）**：B站公开排行榜接口（`ranking/v2`，不需要登录/wbi，实测一次 100 条），`biliShortlist()` 去掉已分享/太短/播放太低/标题像广告的，关键词命中加分，取前 N 再打散——不总是"全站第一"。分享出去的形状是她的一句话 + 标题 + **完整链接**（不是只给 BV 号）。
+- **`lib/store.mjs`**：新表 `proactive`（谁、何时、说了什么、有没有人接）+ `recordProactive` / `finishProactiveCheck` / `pendingProactiveChecks` / `proactiveHistory` / `proactiveRecent` / `listConversations`。顺手修掉一个会让整个库打不开的错：`proactive` 建表注释里有一对反引号，正好落在 `migrate()` 的大模板字符串里（模板被提前闭合，`node` 报 `missing ) after argument list`）。
+- **接线**：`lib/config.mjs` 新增 18 个 `proactive*` 键（每个都写了"为什么"）；`lib/bootstrap.mjs` 挂 `state.proactive`（首 tick 60 秒，之后每 `proactiveTickMs`）；`lib/routes/status.mjs` 的 `memory.proactive` 报 ticks／spoken／declined／failures／shared／nextAt——`declined > spoken` 才是它健康的样子。
+- `test/proactive.test.mjs` 11 项：频率闸四档与探测、抖动下限 60 秒、"有人接"只认别人说的、没到点不醒、候选只挑安静窗口且今天主动过的排除、`none` 不发、说一句（发送 + 写回 `self_message` + 落账本）、窗口在忙退让、15 分钟回查 replied/quiet、分享视频带完整链接且 bvid 记进 shared、发送失败不抛。
+
+验证：`proactive` 11 项、`windows` 13、`lifecycle` 三项里两项（第三项 `untilChecked(1)` 是既有问题，`ff87d4b` 干净 worktree 上同样失败）、`store` 35、`panel` 11、`logic` 197、`json-output` 7、`tool-scope` 6、`memory-context` 42、`self-model` 9、`agent-memory` 14、`diary` 10、`introspect` 11、`reconcile` 8 全绿。`PROMPT_REVISION` 不升：主动层的提示词是它自己那次调用的 system，窗口会话的静态块没变。
+
+为什么该升号：这是她第一次**不被谁问**也会开口，也是第一次会自己判断"这边没人理我"。`/status` 的 build 号必须能区分改前改后。桥接当时没监听 2112，在线 build 未验证；重载后状态页应出现 `memory.proactive`。
+
 2026-10-31 版本号 `v119-window-search` → **`v120-panel-judgement`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："我现在用的这个项目的open panel面板好难用，画面结构也不舒服，能不能优化一下？起码还有让我看见aux的消息判断，看见aux模型为啥选择接话或不接话"。
 
 改了什么：
