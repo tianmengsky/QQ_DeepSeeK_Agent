@@ -113,6 +113,19 @@ await test('legacy 无 at 的自己消息使用 DB.createdAt 恢复；重载不�
   } finally { store.db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+await test('她最后一次说话会落盘：重载之后还知道自己说过话', async () => {
+  const { store, registry, dir } = fixture();
+  try {
+    const entry = registry.entry('group:1');
+    entry.lastSpokeAt = time + 500;
+    registry.persist('group:1');
+    const restored = new ConversationRegistry(ctx, config, store);
+    restored.restoreConversation('group:1');
+    // 不落盘的话每次热重载都归零：世界快照会说"你还没在那边说过话"，冷却也一起失效。
+    assert.equal(restored.entry('group:1').lastSpokeAt, time + 500);
+  } finally { store.db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 await test('第一气泡回执立即进入窗口；第二气泡完成前到达的群友消息保持交错', async () => {
   const { store, registry, entry, dir } = fixture();
   try {

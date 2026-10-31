@@ -84,6 +84,32 @@ try {
     assert.ok(text.length <= 260, `快照应受预算约束，实际 ${text.length}`);
     assert.match(text, /…$/u);
   });
+  await test('会话表那列是死的：从事件里回推"她最后一次说话"', () => {
+    const s = setup();
+    s.store.upsertConversation('group:10', { lastMessageAt: hoursAgo(s.now, 2) });
+    // 真实库里 `conversations.last_spoke_at` 从来没被写过（永远是 0）；
+    // 她说过的话在 events 里。快照必须回推到那一份，否则热重载后她会"忘了自己说过话"。
+    const event = s.store.recordEvent({
+      conversation: 'group:10',
+      kind: 'self_message',
+      payload: { messageId: 'self-1', text: '我在', at: hoursAgo(s.now, 3), timeSource: 'sent' },
+      deliverable: false,
+      createdAt: hoursAgo(s.now, 3),
+    });
+    assert.ok(event);
+    assert.equal(s.store.lastSelfMessageAt('group:10'), hoursAgo(s.now, 3));
+    const text = buildWorldSnapshot({ store: s.store, memory: s.memory, now: s.now });
+    assert.match(text, /你最后一次说话是 3 小时前/u);
+    assert.doesNotMatch(text, /你还没在那边说过话/u);
+  });
+
+  await test('热重载不丢"她说过话"：会话条目里的时间优先于库里那列', () => {
+    const s = setup();
+    s.store.upsertConversation('group:10', { lastMessageAt: hoursAgo(s.now, 1) });
+    const registry = { byKey: new Map([['group:10', { lastSpokeAt: hoursAgo(s.now, 5) }]]) };
+    const text = buildWorldSnapshot({ store: s.store, memory: s.memory, registry, now: s.now });
+    assert.match(text, /你最后一次说话是 5 小时前/u);
+  });
 } finally {
   for (const store of stores) { try { store.close(); } catch { /* 无妨 */ } }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 临时目录清理失败不算失败 */ }

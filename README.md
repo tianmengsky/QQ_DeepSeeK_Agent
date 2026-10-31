@@ -1,3 +1,17 @@
+2026-11-01 版本号 `v130-intent` → **`v131-self-record`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+这一版修的是一个**她不会抱怨、但会让她失忆的静默缺陷**：`conversations.last_spoke_at` 这一列从来没有被写过，而"她最后一次在那儿说话"一直只活在内存会话条目里、又没落盘。于是每次热重载之后，她自己以为"我还没在这个群说过话"——世界快照这么写、`qq_windows list` 也这么写，连主动层的冷却都算成"从没说过"，等于没有冷却。
+
+- `lib/conversation/registry.mjs`：`persist()` 落盘 `lastSpokeAt`，`entry()` 恢复它。这是根因那一处。
+- `Store.lastSelfMessageAt(conversation)`：从 `events` 里回推（`kind IN ('self_message','action')`）。她说过的话一条不落在库列里，但一条不落地在事件里——回推才是不会丢的那份。
+- `lib/application/world-snapshot.mjs`：取"最后一次说话"的顺序改成 内存条目 → 事件回推 → 库列；并把 `registry` 透传进去。主动层挑候选时的冷却也走同一顺序（`proactive.mjs` 的 `spokeAtOf`），`qq_windows list` 同步。
+- `tools/preview-self-time.mjs`（新）：**只读演练**。连线上库、只读打开，把她下次醒来会看到的整段场景文本打印出来（世界快照 + `spineTaskText()`）。`spineTaskText` 因此抽成导出函数——它那一轮唯一的输入面，必须能单独读、单独看。
+- 同时清掉一处重复：任务文本原来和快照末尾都写"没有人在等你回答"，现在任务文本改成"上面是别处发生的事，和你现在坐的地方无关"。
+
+实测（只读、线上库）：六个窗口现在分别报"你最后一次说话是 8 / 5 / 3 / 7 / 3 小时前"，没说过话的窗口仍然如实说"你还没在那边说过话"。测试：`world-snapshot` 4 → **6**（新增"从事件回推"与"内存条目优先"两条）、`context-time` 7 → **8**（新增"最后一次说话落盘、重载后还在"）；`windows 15`、`proactive 23`、`intent 9`、`panel 11`、`store 35`、`json-output 7`、`memory-context 42`、`task-routing 58`、`logic 197` 全过。
+
+为什么该升：这改的是她对自己处境的记忆——`/status` 看不出差别，但重载前后她对"我在哪说过话"的判断不再翻转；同时多了一个只读演练入口，下次要判断"她醒来看到什么"不必再起回合。
+
 2026-11-01 版本号 `v129-spine` → **`v130-intent`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 上一版把决定搬出了房间，但她在外面醒来时只有"现在"：各窗口的动静、刚做过的事、心情。一个人之所以连着，还因为**欠着**——答应过的事、想回头问的一句话。这一版补的是"将来"。
