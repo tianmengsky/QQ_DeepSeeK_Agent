@@ -1,3 +1,14 @@
+2026-11-01 版本号 `v133-task-reaper` → **`v134-spine-reach`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+这一版修的是**脊柱里她伸不出手**：`qq_windows` 每次调用都要过一道"窗口历史来源未准入"，而脊柱（`self:account`）的来源是她自己的号——私聊准入把她自己拦掉了。结果是"决定搬出了房间"，但搬出去之后她**看不见任何窗口、也说不出一句话**：list 直接抛错。
+
+- `lib/conversation/window-tool.mjs`：`here.startsWith('self:')` 时不再用房间准入校验（她的时间不属于任何房间，没有"消息准入"可判）；`list` 的第一行改成"你此刻不在任何房间里——这是你自己的时间。"，`status` 的 `current` 同步成"自己的时间"。
+- 归属检查保留：来源属于当前 Session、`assertExecutionSource`、白名单、编号映射一条没放松。改的只是"她的时间没有房间"这一件事。
+- 测试：`windows` 15 → **16**（新增"她自己的时间：不在任何房间里也能看见窗口，不被房间准入挡住"——用 `self:account` + 独立 session 复现，修复前那条 list 会抛）。
+- `--fast` 1071 项通过，只剩既有 `lifecycle:untilChecked`。
+
+为什么该升：这不是文案，是"自主决定能不能落地"的前置条件——不修它，脊柱模式的产物只能是 `[SKIP]`。
+
 2026-11-01 版本号 `v132-intent-age` → **`v133-task-reaper`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 线上 `/status` 的 `tasks.running` 长期显示 3，但那是假的：`bridge_tasks` 里最老的 `running` 已经放了**十一天**。桥接被杀、HMR 重载、模型链路断在半路——结算那一步不会再发生，任务就永远挂在"执行中"。

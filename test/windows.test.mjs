@@ -55,7 +55,7 @@ function rig(over = {}) {
     store.db.prepare("INSERT INTO self_group (group_id, name, member_count, my_role, seen_at) VALUES ('11','棋友群',9,'member',0)").run();
     store.db.prepare("INSERT INTO self_friend (user_id, nickname, remark, seen_at) VALUES ('200','天梦','天梦',0)").run();
   };
-  return { store, cfg, call, seed, ledger, sent };
+  return { store, cfg, call, seed, ledger, sent, registry };
 }
 
 try {
@@ -204,6 +204,21 @@ try {
     const tool = windowsTool({ store: r.store, config: r.cfg, state, registry: { byKey: new Map() } });
     await assert.rejects(() => tool.execute({ action: 'list' },
       { agent: { session: { id: 'session-a' } }, signal: new AbortController().signal }), /托管已关闭/);
+  });
+  await test('她自己的时间：不在任何房间里也能看见窗口，不被房间准入挡住', async () => {
+    // 脊柱（self:account）里 origin 的 qq 是她自己的号，用私聊准入去校验会把她自己拦掉——
+    // 结果是"在外面醒来"时 qq_windows 整个工具都调不通，连 list 都报"来源未准入"。
+    const r = rig(); r.seed();
+    const origin = r.ledger.origin('self:account',
+      { qq: '999', who: '时间', messageId: 'self-turn:1', text: '[自主时间] 现在没有新消息。', at: Date.now() });
+    publishTurnSession(r.store, 'session-self', { conversation: 'self:account', sourceRef: origin });
+    // 线上她醒在脊柱时，会话表里就有这条 self:account 条目；归属检查靠它认出调用者。
+    r.registry.byKey.set('self:account', { sessionId: 'session-self' });
+    const out = await r.call({ action: 'list' }, 'session-self');
+    assert.equal(out.status, 'WINDOWS');
+    assert.match(out.text, /你此刻不在任何房间里/u);
+    assert.match(out.text, /棋友群/u);
+    assert.doesNotMatch(out.text, /group:11/u);
   });
 } finally {
   for (const store of stores) { try { store.close(); } catch {} }
