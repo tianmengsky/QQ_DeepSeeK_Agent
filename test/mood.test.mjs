@@ -18,7 +18,7 @@ import { Store } from '../lib/store.mjs';
 import { MemoryStore } from '../lib/memory/memory-store.mjs';
 import { buildMemoryInjection } from '../lib/prompt/render.mjs';
 import { MemoryDiarist } from '../lib/memory/diary.mjs';
-import { readMood, writeMood, sanitizeMood, MOOD_STATE_KEY } from '../lib/memory/mood.mjs';
+import { readMood, writeMood, sanitizeMood, composeMood, writeMoodCandidate, readMoodCandidates, MOOD_STATE_KEY, MOOD_MAX_CHARS } from '../lib/memory/mood.mjs';
 import { config, message } from './helpers/bridge.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-mood-'));
@@ -103,7 +103,7 @@ try {
     writeMood(s.store, { text: '今天   有点\n闷' });
     assert.equal(readMood(s.store).text, '今天 有点 闷');
     writeMood(s.store, { text: '啊'.repeat(200) });
-    assert.equal(readMood(s.store).text.length, 80);
+    assert.equal(readMood(s.store).text.length, MOOD_MAX_CHARS);
   });
 
   await test('天气里的号码会被换成"某个人"（它要进群聊）', async () => {
@@ -114,6 +114,21 @@ try {
     assert.doesNotMatch(text, /123456789/u);
     assert.match(text, /某个人/u);
     assert.ok(s.store.getState(MOOD_STATE_KEY));
+  });
+  await test('一天里几个房间的傍晚会合成天气，谁先写完都不会盖掉另一边', () => {
+    const s = setup();
+    writeMoodCandidate(s.store, { conversation: 'group:10', day: '2026-10-29', text: '这边没人接我的话，有点闷。', at: 1 });
+    assert.match(composeMood(readMoodCandidates(s.store, { day: '2026-10-29' })), /有点闷/u);
+    writeMoodCandidate(s.store, { conversation: 'group:11', day: '2026-10-29', text: '那边倒是热闹，我还想再插一句。', at: 2 });
+    const both = composeMood(readMoodCandidates(s.store, { day: '2026-10-29' }));
+    assert.match(both, /有点闷/u, '先写的那间屋子不能被后写的盖掉');
+    assert.match(both, /再插一句/u);
+    assert.equal(readMoodCandidates(s.store, { day: '2026-10-28' }).length, 0, '昨天的候选不该压今天的天气');
+    // 同一间屋子重写：只留最新一句，不重复堆叠。
+    writeMoodCandidate(s.store, { conversation: 'group:11', day: '2026-10-29', text: '那边后来冷了，我也不想说话了。', at: 3 });
+    const revised = readMoodCandidates(s.store, { day: '2026-10-29' });
+    assert.equal(revised.filter((item) => item.conversation === 'group:11').length, 1);
+    assert.match(revised.find((item) => item.conversation === 'group:11').text, /不想说话/u);
   });
 } finally {
   for (const store of stores) { try { store.close(); } catch { /* 无妨 */ } }
