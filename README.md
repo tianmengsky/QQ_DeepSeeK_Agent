@@ -10,13 +10,16 @@
 - **窗口在忙就退让**：有未读（`entry.pending`）、或 60 秒清醒窗口还开着（`awakeUntil`）就不发。锁只在"发送 + 记账"那几十毫秒里持有，**决策不持锁**——否则她思考的 8 秒会把群消息全卡在队列里。
 - **学习是真的会停**：`frequencyFactor()` 看这个会话最近 6 次主动发言的回应率——≥50% 照常、≥20% 减半、更低四分之一、**一次都没有就 0（不再主动）**。结果落 `proactive` 表活过重载；`proactiveProbeDays`（默认 0 = 不探）想给关系留翻身机会的人可以填 30。
 - **`lib/application/bili-feed.mjs`（新，约 165 行）**：B站公开排行榜接口（`ranking/v2`，不需要登录/wbi，实测一次 100 条），`biliShortlist()` 去掉已分享/太短/播放太低/标题像广告的，关键词命中加分，取前 N 再打散——不总是"全站第一"。分享出去的形状是她的一句话 + 标题 + **完整链接**（不是只给 BV 号）。
+- **线上第一跑就撞上的坑（已修）**：UA 写成残缺的 `... AppleWebKit/537.36 Chrome/126 Safari/537.36` 会被B站风控判 `code=-352`、100% 复现；换成带 `(KHTML, like Gecko)` 与完整版本号的 Chrome UA 就正常返回 100 条。同一个请求、只差 UA 这一点，所以新增 `test/bili-feed.test.mjs` 4 项专门钉**请求形状**（UA 像真浏览器、坏 code/坏状态码/空列表都不抛、短名单过滤与打散、分享文案三行）。
 - **`lib/store.mjs`**：新表 `proactive`（谁、何时、说了什么、有没有人接）+ `recordProactive` / `finishProactiveCheck` / `pendingProactiveChecks` / `proactiveHistory` / `proactiveRecent` / `listConversations`。顺手修掉一个会让整个库打不开的错：`proactive` 建表注释里有一对反引号，正好落在 `migrate()` 的大模板字符串里（模板被提前闭合，`node` 报 `missing ) after argument list`）。
 - **接线**：`lib/config.mjs` 新增 18 个 `proactive*` 键（每个都写了"为什么"）；`lib/bootstrap.mjs` 挂 `state.proactive`（首 tick 60 秒，之后每 `proactiveTickMs`）；`lib/routes/status.mjs` 的 `memory.proactive` 报 ticks／spoken／declined／failures／shared／nextAt——`declined > spoken` 才是它健康的样子。
 - `test/proactive.test.mjs` 11 项：频率闸四档与探测、抖动下限 60 秒、"有人接"只认别人说的、没到点不醒、候选只挑安静窗口且今天主动过的排除、`none` 不发、说一句（发送 + 写回 `self_message` + 落账本）、窗口在忙退让、15 分钟回查 replied/quiet、分享视频带完整链接且 bvid 记进 shared、发送失败不抛。
 
-验证：`proactive` 11 项、`windows` 13、`lifecycle` 三项里两项（第三项 `untilChecked(1)` 是既有问题，`ff87d4b` 干净 worktree 上同样失败）、`store` 35、`panel` 11、`logic` 197、`json-output` 7、`tool-scope` 6、`memory-context` 42、`self-model` 9、`agent-memory` 14、`diary` 10、`introspect` 11、`reconcile` 8 全绿。`PROMPT_REVISION` 不升：主动层的提示词是它自己那次调用的 system，窗口会话的静态块没变。
+验证：`proactive` 11 项、`bili-feed` 4 项、`windows` 13、`lifecycle` 三项里两项（第三项 `untilChecked(1)` 是既有问题，`ff87d4b` 干净 worktree 上同样失败）、`store` 35、`panel` 11、`logic` 197、`json-output` 7、`tool-scope` 6、`memory-context` 42、`self-model` 9、`agent-memory` 14、`diary` 10、`introspect` 11、`reconcile` 8 全绿，`--fast` 共 1023 项。`PROMPT_REVISION` 不升：主动层的提示词是它自己那次调用的 system，窗口会话的静态块没变。
 
-为什么该升号：这是她第一次**不被谁问**也会开口，也是第一次会自己判断"这边没人理我"。`/status` 的 build 号必须能区分改前改后。桥接当时没监听 2112，在线 build 未验证；重载后状态页应出现 `memory.proactive`。
+为什么该升号：这是她第一次**不被谁问**也会开口，也是第一次会自己判断"这边没人理我"。`/status` 的 build 号必须能区分改前改后。
+
+在线验证（重载后）：`/status` 报 `build v121-proactive`、`memory.proactive.nextAt` 已排到约 1 小时后；aux 判断流里能看到第一条主动判断 `{"action":"none","why":"没谁等着接，先不硬塞"}`（917ms、0 reasoning 字）——默认答案确实是 `none`，思考也确实关了。重载前那个进程建的表还没出现（热重载不重跑 `migrate()`），已手工把 `proactive` 表补进线上库。
 
 2026-10-31 版本号 `v119-window-search` → **`v120-panel-judgement`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："我现在用的这个项目的open panel面板好难用，画面结构也不舒服，能不能优化一下？起码还有让我看见aux的消息判断，看见aux模型为啥选择接话或不接话"。
 

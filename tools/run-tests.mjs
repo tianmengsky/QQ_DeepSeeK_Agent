@@ -40,6 +40,7 @@ const suites = [
   'introspect',
   'windows',
   'proactive',
+  'bili-feed',
   'notebook-projection',
   'lifecycle',
   'launcher',
