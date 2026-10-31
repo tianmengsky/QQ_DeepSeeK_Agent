@@ -21,6 +21,7 @@ import {
   proactiveSnapshot,
   frequencyFactor,
   jitteredDelay,
+  nextDelay,
   engagementOf,
 } from '../lib/application/proactive.mjs';
 import { config } from './helpers/bridge.mjs';
@@ -205,6 +206,24 @@ try {
     assert.equal(jitteredDelay(1000, 0.4, () => 0), 60000);
   });
 
+  /**
+   * 2026-11-01 用户改口径：不要"一小时 ±40%"，要每次 30~60 分钟之间随机。
+   * 两端都要钉住——否则某次调参把它写成固定周期，测试也看不出来。
+   */
+  await test('倒计时是 30~60 分钟之间的随机值，不是周期抖动', () => {
+    const cfg = { proactiveIntervalMinMs: 1800000, proactiveIntervalMaxMs: 3600000 };
+    assert.equal(nextDelay(cfg, () => 0), 1800000);
+    assert.ok(nextDelay(cfg, () => 0.999999) >= 3590000, '接近上界时应落到 60 分钟附近');
+    const mid = nextDelay(cfg, () => 0.5);
+    assert.ok(mid > 2600000 && mid < 2800000, `中点应落在 27 分钟附近，实际 ${mid}`);
+    for (let i = 0; i < 20; i++) {
+      const value = nextDelay(cfg);
+      assert.ok(value >= 1800000 && value <= 3600000, `第 ${i} 次越界：${value}`);
+    }
+    // 只配了老字段的配置仍走抖动路径，不能直接崩。
+    assert.equal(nextDelay({ proactiveIntervalMs: 3600000, proactiveJitterPct: 0.4 }, () => 0), 2160000);
+  });
+
   await test('"有人接"只认别人说的：她自己那条不算回应', () => {
     const since = 1000;
     assert.equal(engagementOf([{ kind: 'self_message', createdAt: 2000, payload: { text: '我自己说的' } }], since), false);
@@ -268,8 +287,9 @@ try {
     assert.equal(rows[0].status, 'sent');
     assert.equal(s.stats.proactiveSpoke, 1);
     assert.equal(s.stats.lastProactive.ok, true);
-    // 下一轮的时间被推后且带抖动。
-    assert.ok(s.host.runtime.nextAt > Date.now() + 3600000 * 0.6 - 5000);
+    // 下一轮的时间被推后，且落在 30~60 分钟的随机区间里。
+    assert.ok(s.host.runtime.nextAt > Date.now() + 1800000 - 5000);
+    assert.ok(s.host.runtime.nextAt <= Date.now() + 3600000 + 5000);
   });
 
   await test('窗口在忙就退让：有未读不发、刚说完话不发', async () => {

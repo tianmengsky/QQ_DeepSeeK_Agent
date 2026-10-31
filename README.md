@@ -1,3 +1,13 @@
+2026-11-01 版本号 `v123-self-time` → **`v124-self-clock`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+两处按用户口径改的钟：
+
+- **倒计时从"一小时 ±40%"改成每次 30~60 分钟之间随机**（`nextDelay()`，`proactiveIntervalMinMs`/`proactiveIntervalMaxMs`，默认 30/60 分钟）。抖动的周期仍有一个可预期的重心，"差不多整点又要来了"；均匀随机没有重心。旧的两个键（`proactiveIntervalMs`/`proactiveJitterPct`）保留，只在没配 min/max 时生效，不破坏旧配置。
+- **看表的周期 5 分钟 → 1 分钟**（`proactiveTickMs`）。唤起点本身是随机区间，看表不该再拖慢它；否则 30 分钟会被拖成 35 分钟。
+- 睡觉时段确认是 **01:00–08:00**（`proactiveSleepFrom: 1` / `proactiveSleepTo: 8`，含 from 不含 to，跨零点也成立），这段时间她不会醒，`lastProactive.action = 'sleep'`。
+
+验证：`proactive` 20 → **21 项**（新增"倒计时是 30~60 分钟随机、旧配置仍走抖动"）；`panel 11 / logic 197 / store 35 / windows 13 / memory-context 42` 全绿。
+
 2026-11-01 版本号 `v122-proactive-guard` → **`v123-self-time`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 这一版把主动层的**决策点整个换掉**，起因是用户连问两句："B站此刻的热门不是这个意思啊，我有给他刷 b 站的插件"和"为什么只有安静了很久的对话才让她选择啊，我们不给他真正的主动性自由吗"。两句话指向同一个毛病：**我在替她做决定**。
