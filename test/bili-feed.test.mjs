@@ -96,5 +96,18 @@ await test('分享文案：她的话在上，标题其次，链接必须是完�
   assert.equal(lines[2], 'https://www.bilibili.com/video/BV1xx411c7mD');
 });
 
+await test('-352 是概率性的：撞上会退一步重试，第二次成了就算成', async () => {
+  let calls = 0;
+  const flaky = async () => {
+    calls += 1;
+    if (calls === 1) return { ok: true, status: 200, json: async () => ({ code: -352 }) };
+    return { ok: true, status: 200, json: async () => ({ code: 0, data: { list: SAMPLE } }) };
+  };
+  const result = await fetchBiliRanking({ fetchImpl: flaky, attempts: 2 });
+  assert.equal(calls, 2);
+  assert.equal(result.reason, 'ok');
+  assert.equal(result.items.length, SAMPLE.length);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exitCode = 1;

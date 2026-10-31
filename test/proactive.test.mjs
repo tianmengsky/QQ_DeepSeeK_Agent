@@ -331,6 +331,20 @@ try {
     assert.equal(s.stats.proactiveFailures, 1);
     assert.equal(s.proactive().length, 0);
   });
+  await test('陈旧上限：安静超过七天的窗口不算候选', async () => {
+    const s = setup({ settings: { proactiveStaleHours: 168 }, llm: fakeLlm({ action: 'none', why: 'x' }) });
+    quietFor(s.store, 'group:10', 24 * 10);
+    const found = await s.host.candidates({ now: Date.now() });
+    assert.equal(found.speak.length, 0);
+  });
+
+  await test('不把她自己的号当成想说话的窗口', async () => {
+    const s = setup({ settings: { selfIds: ['900'] }, llm: fakeLlm({ action: 'none', why: 'x' }) });
+    quietFor(s.store, 'user:900', 10);
+    quietFor(s.store, 'user:200', 10);
+    const found = await s.host.candidates({ now: Date.now() });
+    assert.deepEqual(found.speak.map((x) => x.key), ['user:200']);
+  });
 } finally {
   globalThis.fetch = realFetch;
   for (const store of stores) {
