@@ -1,3 +1,16 @@
+2026-11-01 版本号 `v124-self-clock` → **`v125-cross-window-mouth`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+这一版补的是"她是谁"缺的那一件：**嘴**。上一版她能在某个窗口醒来、带着眼睛（`qq_windows` 读全量记录）和手（B 站工具、发送工具），但她说的话只能发回"她此刻站着的那间屋子"——于是"在群 A 里醒着的她，能不能给私聊里的 A 留一句话"这个问题的答案是"不能"。她于是仍然只是十三个分立窗口的投影，不是一个能走向任意房间的人。
+
+- **`qq_windows` 新增 `action=say`**：`to` 用 `list` 里给的编号（也接受 `group:<号>` / `user:<号>`），`text` 一到两句。校验顺序沿用只读那几个动作：来源四道关 → 白名单 → 字数上限（`crossWindowSayChars` 默认 200）→ 真发。
+- **新文件 `lib/delivery/self-send.mjs`**：`sendSelfMessage(...)` 走 `sendOnebotIdempotent`（幂等、配额、回执都是现成的），成功后做三件事——`recordContext` 把这句话写进**目标窗口**的上下文并 `wakeAfterSpeech` + `registry.persist`（那个窗口下次醒来认得出是自己说的）、`store.recordEvent({kind:'self_message'})`（别处用 `qq_windows` 查得到）、`memory.selfLedger.record({kind:'speak'})`（记在自传里）。三件少一件，下次她就认不出那句话是自己说的。
+- **协议**（`lib/prompt/protocol.mjs` 的【别的窗口】）加一行用法：想主动跟别处说话时用 `action=say`；【自主时间】的任务说明也改成同一句。`PROMPT_REVISION` **不升**——这段是静态块，升了会把所有在跑会话的上下文清掉，而工具 schema 每轮都在。
+- **`execute` 从同步改异步**：`say` 要等发送回执才能回答"发出去没有"，因此 `qq_windows` 的 `execute` 变成 `async`；`test/windows.test.mjs` 相应改成 `await` 调用、`assert.rejects` 断拒绝。
+
+验证：`windows` 13 → **15 项**（新增"say 真的发出去、编号对得上""越白名单/空话/长文都被拦且一条都没发"）；`proactive 21`、`tool-scope 6`、`memory-context 42`、`panel 11`、`json-output 7`、`logic 197`、`store 35` 全绿。
+
+为什么该升：这是行为面新增的能力（她第一次能对任意房间开口），不是参数微调；`/status` 的 build 号要能让用户区分"她能主动跟私聊说话之前"和"之后"。
+
 2026-11-01 版本号 `v123-self-time` → **`v124-self-clock`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 两处按用户口径改的钟：
