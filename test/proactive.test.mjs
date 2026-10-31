@@ -157,12 +157,12 @@ function setup({ settings = {}, llm = fakeLlm({ action: 'none', why: '现在没�
 }
 
 /** 往会话里塞一条"很多小时前"的消息，让 conversations 表的 last_message_at 生效。 */
-function quietFor(store, conversation, hours, text = '有人吗') {
+function quietFor(store, conversation, hours, text = '有人吗', now = Date.now()) {
   store.recordEvent({
     conversation,
     kind: conversation.startsWith('group:') ? 'group_message' : 'private_message',
     payload: { text, who: '甲', qq: '111', messageId: `${conversation}:${hours}` },
-    createdAt: Date.now() - hours * 3600000,
+    createdAt: now - hours * 3600000,
   });
 }
 
@@ -442,17 +442,21 @@ try {
   });
 
   await test('真回合模式：今天的次数用完了就不醒', async () => {
+    // 用固定的白天时间：睡觉闸是 01:00–08:00，用真实墙上时间写这条断言，
+    // 凌晨跑 CI 时就会先被 sleep 拦下，测不到额度闸。
+    const daytime = new Date(2026, 9, 30, 15, 0).getTime();
     const s = setup({ settings: { proactiveMode: 'turn', proactiveDailyMax: 1 } });
-    quietFor(s.store, 'group:10', 10);
+    quietFor(s.store, 'group:10', 10, '有人吗', daytime);
     s.store.recordProactive({ conversation: 'group:10', kind: 'turn', trigger: 'self-time', idemKey: 'x:1' });
-    const result = await s.host.tick({ now: Date.now(), force: true });
+    const result = await s.host.tick({ now: daytime, force: true });
     assert.equal(result.reason, 'daily-budget');
     assert.equal(s.proactive().length, 1, '不该再记一条');
   });
 
   await test('真回合模式：没有能待的窗口就什么都不做，不报错', async () => {
+    const daytime = new Date(2026, 9, 30, 15, 0).getTime();
     const s = setup({ settings: { proactiveMode: 'turn' } });
-    const result = await s.host.tick({ now: Date.now(), force: true });
+    const result = await s.host.tick({ now: daytime, force: true });
     assert.equal(result.reason, 'no-window');
     assert.equal(s.stats.proactiveFailures ?? 0, 0);
   });

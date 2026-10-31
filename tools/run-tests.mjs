@@ -36,6 +36,7 @@ const suites = [
   'self',
   'self-model',
   'diary',
+  'mood',
   'reconcile',
   'introspect',
   'windows',
