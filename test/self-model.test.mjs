@@ -34,7 +34,10 @@ function rig(settings = {}) {
   const origin = memory.episodes.origin('group:10', { qq: '200', who: '甲', messageId: '1',
     text: '你说你被夸的时候会先装没听懂。', at: Date.now() });
   const registry = { byKey: new Map([['group:10', { sessionId: 'session-a' }]]) };
-  const state = { enabled: true, disposed: false, sourceLedger: memory.episodes };
+  const state = { enabled: true, disposed: false, sourceLedger: memory.episodes,
+    // 这些用例代表"后台写者"（收尾/自主时间）——房间里的普通回合写不了 scope=self，
+    // 那条边界由 agent-memory.test.mjs 的"房间不能替她署名"单独钉。
+    memoryFlushSessions: new Set(), selfTurnSessions: new Set(['session-a']) };
   const tool = memoryTool({ memory, registry, store, config: cfg, state });
   publishTurnSession(store, 'session-a', { conversation: 'group:10', sourceRef: origin });
   const call = (args) => tool.execute(args,

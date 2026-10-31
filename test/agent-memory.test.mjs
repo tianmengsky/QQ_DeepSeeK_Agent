@@ -26,7 +26,10 @@ function rig() {
   const origin = memory.episodes.origin('group:10', { qq: '200', who: '甲', messageId: '1',
     text: '请记住我十月到十二月在实习。我不吃香菜。忘记我的偏好。恢复旧版本。', at: Date.now() });
   const registry = { byKey: new Map([['group:10', { sessionId: 'session-a' }]]) };
-  const state = { enabled: true, disposed: false, sourceLedger: memory.episodes };
+  const state = { enabled: true, disposed: false, sourceLedger: memory.episodes,
+    // 这些用例代表"后台写者"（收尾/自主时间）——房间里的普通回合写不了 scope=self，
+    // 那条边界由 agent-memory.test.mjs 的"房间不能替她署名"单独钉。
+    memoryFlushSessions: new Set(), selfTurnSessions: new Set(['session-a']) };
   const tool = memoryTool({ memory, registry, store, config: cfg, state });
   publishTurnSession(store, 'session-a', { conversation: 'group:10', sourceRef: origin });
   const call = (args, session = 'session-a') => tool.execute(args,
@@ -143,6 +146,22 @@ try {
     assert.equal(resolveMemoryDir({}, data), path.join(data, 'memory'));
     const explicit = path.join(root, 'explicit-memory');
     assert.equal(resolveMemoryDir({ memoryDir: explicit }, data), explicit, '显式配置必须优先');
+  });
+  await test('房间不能替她署名：聊天里写不了 scope=self，读得到，收尾会话可以写', () => {
+    const r = rig();
+    // 普通房间回合：不在任何后台写者名单里。
+    r.state.selfTurnSessions.clear();
+    assert.throws(
+      () => r.call({ action: 'upsert', scope: 'self', slot: 'me.stance.floor', version: 0, kind: 'stance',
+        visibility: 'public', text: '我改主意了。' }),
+      /后台/, '房间写自己的本子必须被拦，且提示要说清是后台在写',
+    );
+    // 读从不拦：她随时可以翻自己的本子，那是阅读，不是署名。
+    r.state.memoryFlushSessions.add('session-a');
+    assert.equal(r.call({ action: 'upsert', scope: 'self', slot: 'me.stance.floor', version: 0, kind: 'stance',
+      visibility: 'public', text: '我改主意了。' }).status, 'SAVED');
+    const read = r.call({ action: 'read', scope: 'self' });
+    assert.ok(read.chars > 0, '收尾会话写下的条目应当读得到');
   });
 } finally { for (const s of stores) s.db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 console.log(`${passed} passed, ${failed} failed`);

@@ -1,3 +1,19 @@
+2026-11-01 版本号 `v126-mood` → **`v127-single-author`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+这一版收的是**署名权**：从此以后，"我是谁"这本账只有一个写者的身份，房间不能替她改。
+
+上一版给了她一具共享的体温（天气），但账本身仍然是十几个房间都能写的——`me.*` 会注入所有场合，而每个房间里她都能通过 `qq_memory` 写它。等于十几个念头各自篡改同一本账：身份分叉不是想象力的问题，是权限的问题。
+
+- **边界**：`scope=self` 的**写**只允许后台写者——收尾（`memoryFlushSessions`）、自主时间（新的 `selfTurnSessions`），将来还有脊柱。普通房间回合写自记，直接拒绝，并告诉她"这一轮你能记的是别人和这个群"。
+- **读从不拦**：她随时可以翻自己的本子。阅读不是署名。
+- `lib/application/proactive.mjs` 在真回合前后把当前窗口的 session 加进/移出 `state.selfTurnSessions`（`try/finally`，异常也不漏）。`lib/bootstrap.mjs` 的 `state` 带上这个 Set，与收尾那个 Set 并列。
+- 工具说明同步改成"只有你自己的时间能写"，否则她会先撞一次墙再知道规矩。
+- 测试：`agent-memory` 14 → 15（新增"房间不能替她署名"：房间写被拦且提示提到后台、收尾会话能写、读不拦）；两个 rig 的 `state` 标成后台写者并注明理由。
+- 受影响套件全绿：`memory-context 42`、`proactive 21`、`windows 15`、`panel 11`、`store 35`、`task-routing 58`、`memory-flush 11`、`self-model 9`、`mood 5`、`diary 10`、`introspect 11`、`logic 197`。
+- `PROMPT_REVISION` 不升（静态块没变，工具说明每轮都在）。
+
+为什么该升：`/status` 的 build 号要能区分"房间可以替她署名"和"只有她自己署名"——这是身份治理的边界变化，不是参数微调。
+
 2026-11-01 版本号 `v125-cross-window-mouth` → **`v126-mood`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 这一版补的是"多脑"缺的那一件：**天气**。
