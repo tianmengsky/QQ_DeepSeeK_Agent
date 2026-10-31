@@ -107,6 +107,21 @@ await test('同一幂等编号换内容会被拒绝，不会被顶掉', () => {
   assert.equal(conflict.receipt.payload, JSON.stringify({ message: 'A' }), '原回执不能被改写');
 });
 
+await test('migrate 可以重复调用：热重载补建新表不会报错', () => {
+  const { store } = tmpStore();
+  // 线上踩过：热重载复用了同一个 Store 实例，新版本加的 `proactive` 表没被建出来，
+  // 只能手工补 DDL。补建（bootstrap 里再调一次 migrate）必须是安全的。
+  assert.doesNotThrow(() => store.migrate());
+  assert.doesNotThrow(() => store.migrate());
+  const names = store.db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all()
+    .map((row) => row.name);
+  for (const table of ['proactive', 'intents', 'events', 'conversations']) {
+    assert.ok(names.includes(table), `应该有 ${table} 表`);
+  }
+});
+
 await test('UNKNOWN 能被列出来（不许静默丢失）', () => {
   const { store } = tmpStore();
   store.beginSend({ idemKey: 'u1', conversation: 'group:7', kind: 'x', target: '7', payload: {} });

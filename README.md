@@ -1,3 +1,13 @@
+2026-11-01 版本号 `v134-spine-reach` → **`v135-hot-migrate`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+线上踩过一次的坑：热重载**复用了同一个 `Store` 实例**，所以 `migrate()` 不会再跑——新版本加的 `proactive` 表根本没被建出来，只能手工补 DDL。这一版把补建写进启动流程。
+
+- `lib/bootstrap.mjs`：Store 可用时先 `store.migrate()` 再往下走（收殓、对账、日结都在它后面）。`migrate()` 全是 `CREATE TABLE IF NOT EXISTS`，重复调用安全；失败只 warn，不挡启动。
+- `test/store.test.mjs`：新增「migrate 可以重复调用」（连调两次不抛，`proactive`/`intents`/`events`/`conversations` 都在），36 项。
+- `--fast` 1072 项通过，只剩既有 `lifecycle:untilChecked`。
+
+为什么该升：从这一版起，**加表不再依赖"重启而不是重载"**。`qq_intent`、主动层这些新器官最怕的就是"代码换了、表没建"。
+
 2026-11-01 版本号 `v133-task-reaper` → **`v134-spine-reach`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 这一版修的是**脊柱里她伸不出手**：`qq_windows` 每次调用都要过一道"窗口历史来源未准入"，而脊柱（`self:account`）的来源是她自己的号——私聊准入把她自己拦掉了。结果是"决定搬出了房间"，但搬出去之后她**看不见任何窗口、也说不出一句话**：list 直接抛错。
