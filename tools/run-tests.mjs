@@ -42,6 +42,7 @@ const suites = [
   'intent',
   'tool-shape',
   'spine-task',
+  'self-time-prompt',
   'reconcile',
   'introspect',
   'windows',

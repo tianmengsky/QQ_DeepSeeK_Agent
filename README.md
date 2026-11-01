@@ -1,3 +1,15 @@
+2026-11-01 版本号 `v138-autonomy` → **`v139-self-time-frame`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**她不是"不像在找事做"，是那份提示词还在让她接话。** 用户看完脊柱回合的完整注入后指出："这一轮的结果和心跳机制判断接话没区别。" 顺着查，问题在静态协议而不是任务文本：协议里写着"每个气泡用『』框起来，桥接会发出去"——可脊柱回合的 `__spine` 分支**正文一个字都不投递**。她写了一段话以为发出去了，其实什么也没发生，于是整轮只剩"说/不说"两个选项，"做事"从来没出现在选项里。
+
+- `lib/prompt/protocol.mjs`：`stableProtocol(config, isGroup, { selfTime })`。自己的时间里换掉气泡/投递/长任务三段，改写成【你自己的时间】：正文不发出去、产出是"你做了什么"、真能送出去只有发言工具与 `qq_windows say`、工具回执是唯一证据；顺手把"群聊轮次与退避"也挡在 `selfTime` 之外。普通回合一字未改。
+- `lib/prompt/render.mjs`：脊柱回合把行为规则标题从【群聊行为规则】改成【行为规则】——她不在群里，标题会把她拽回接话姿态。
+- `lib/agent/runner.mjs`：outcome 新增 `toolNames`（这一轮真调过的工具名，按顺序）。以前"做了什么"只活在上游事件流里，没有任何一处落账，自传只能记"她开口了"。
+- `lib/application/self.mjs`：自传新增 `act` 类别——她自己时间里**做了但没说出来**的事。
+- `lib/application/proactive.mjs`：`describeActions()` 把工具名翻译成"在 B 站翻了一会儿""翻了自己的记事本""动了自己的昵称或签名"，写进自传；翻译只看工具名不看参数（参数里有群号、别人的原话）。
+
+验证：`self-time-prompt 6`、`spine-task 5`、`proactive 23`、`memory-context 42`、`logic 197`；`--fast` 1090 项通过，仅既有 `lifecycle:untilChecked` 失败。为什么该升：她这一轮读到的协议变了，是线上行为变化。
+
 2026-11-01 版本号 `v137-manual-wake` → **`v138-autonomy`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 **把"自由"从一句空话改成一张能用的清单。** 用户读了脊柱提示词以后说："谁看了不迷糊啊，自主性不高诶"——她说得对。原来那段只写"你可以什么都不做，也可以看别处、去 B 站逛一会儿，也可以忽然想起谁"，第一次叫醒 4 秒回 `[SKIP]`，不是不想做，是**没人告诉她手里有什么**。现在 `spineTaskText()` 逐条列出真能做的事，每条都对得上 `allowedToolNames()` 里存在的工具：跟谁说话（`qq_windows` list/say/search）、在群里开口并 @ 人（`qq_send_group_msg`）、刷 B 站（`bili_search`/`bili_subtitle`/`bili_frames` 并分享）、记一件回头要做的事（`qq_intent add`）、整理自己的本子（`qq_memory`，只在自主时间能写）、改昵称/签名（`qq_set_profile`）、改群名片/群名/发公告（`qq_manage_group set_card|set_group_name|notice_set`）、戳一戳/表情包/语音。末尾仍写"也可以什么都不做（回 [SKIP]），但该是因为这会儿确实没什么想做的，不是因为不知道能做什么"。
