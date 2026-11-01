@@ -122,6 +122,15 @@ try {
     // 仍然在账上，没有替她判"过期"。
     assert.equal(s.store.countOpenIntents(), 2);
   });
+  await test('连着几次没开口也是记录：不是"我好像从没醒来过"', () => {
+    const s = setup();
+    for (let i = 0; i < 3; i++) {
+      const id = s.store.recordProactive({ conversation: 'group:10', kind: 'turn', text: '', idemKey: 'q' + i });
+      s.store.db.prepare("UPDATE proactive SET status = 'skipped', created_at = ? WHERE id = ?").run(hoursAgo(s.now, i + 1), id);
+    }
+    const text = buildWorldSnapshot({ store: s.store, memory: s.memory, now: s.now });
+    assert.match(text, /最近 3 次醒来，你都只是看了看，没开口/u);
+  });
 } finally {
   for (const store of stores) { try { store.close(); } catch { /* 无妨 */ } }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 临时目录清理失败不算失败 */ }

@@ -40,6 +40,7 @@ const suites = [
   'self-actions',
   'world-snapshot',
   'intent',
+  'tool-shape',
   'reconcile',
   'introspect',
   'windows',

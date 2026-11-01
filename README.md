@@ -1,3 +1,15 @@
+2026-11-01 版本号 `v135-hot-migrate` → **`v136-tool-shape`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**一个字段名把 DSH 整个挡在启动门外。** `qq_intent` 的参数表写成了 `inputSchema`，宿主 `tools.register` 读的是 `parameters` —— 这个校验发生在 `apply` 阶段，所以症状不是"这个工具用不了"，而是应用起不来：页面上只有一句"应用无法启动或已意外停止"，堆栈里唯一认得出来的行是 `at new apply (…/lib/bootstrap.mjs:241:11)`。从 v130 上线起，桥接就再没被加载过；`/qq/onebot` 404、`proactive` 表 0 行、主动回合一次没醒，全是这一个字段。
+
+- `lib/application/intent-tool.mjs`：`inputSchema` → `parameters`，并补 `output: { schema: {}, render }`（与 `qq_memory` / `qq_windows` 同形状）；注释写明为什么这个字段名不能省。
+- `test/tool-shape.test.mjs`（新，5 项）：用最小的假 registry 复刻宿主契约（`name` / `description` / `parameters.type==='object'` / `output.render` / `execute`），把 `qq_memory`、`qq_windows`、`qq_intent` 三个工具都过一遍，并断言"参数表一律用 `parameters`，不允许 `inputSchema`"。
+- `tools/run-tests.mjs`：suites 加 `'tool-shape'`。
+- `lib/application/world-snapshot.mjs`：顺手带上「连着几次没开口也是记录」——同一份 `proactiveRecent` 里 `status='skipped' && kind='turn'` 24 小时内 ≥3 次，世界快照会多一行"【这几天你自己的时间】最近 N 次醒来，你都只是看了看，没开口"（`test/world-snapshot.test.mjs` 第 8 项钉住）。
+- 验证：`tool-shape 5`、`intent 9`、`windows 16`、`world-snapshot 8`、`memory-context 42`、`logic 197` 全绿；`--fast` 1078 项通过（仅既有 `lifecycle:untilChecked`）；线上 `build=v135-hot-migrate` → 修复热重载后 `/qq/onebot` 恢复、`qq_intent` 出现在工具表里、QQ 重新上线（3667925015 / DeepSeek大肥鱼）。
+
+为什么该升：这是"工具形状"这一类错误的第一次现形——**工具注册失败会让整个插件加载失败**，而之前的测试全都只调 `execute`，测不到"交给宿主的那个对象长什么样"。
+
 2026-11-01 版本号 `v134-spine-reach` → **`v135-hot-migrate`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 线上踩过一次的坑：热重载**复用了同一个 `Store` 实例**，所以 `migrate()` 不会再跑——新版本加的 `proactive` 表根本没被建出来，只能手工补 DDL。这一版把补建写进启动流程。
