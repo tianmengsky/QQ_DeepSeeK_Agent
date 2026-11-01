@@ -53,6 +53,16 @@ await test('快照原样保留在最前面，不被说明挤掉', () => {
   assert.ok(text.startsWith('【快照】'));
 });
 
+await test('分享视频的形状写死了：话 + 标题 + 完整链接', () => {
+  // 2026-11-01：她在群里主动 "分享" 了一条自己刷到的视频，但只发一句感想、
+  // 没有标题也没有链接，看到的人不知道她在讲什么。她的历史发言里一条链接
+  // 都没有过，所以这个形状不写死就不会自己长出来。
+  assert.match(text, /bilibili\.com\/video\/BV/u, '要给出完整链接的形状');
+  assert.match(text, /标题/u);
+  assert.match(text, /三行|三样/u, '要说明是几样东西一起给');
+  assert.ok(/不算分享/.test(text), '要点明只发一句感想不算分享');
+});
+
 await test('"外面"与房间的区别要写清楚（否则她会就地回话，什么都没发出去）', () => {
   assert.ok(text.includes('只有 say 那一下才真发出去'));
 });
