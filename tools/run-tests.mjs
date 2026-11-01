@@ -41,6 +41,7 @@ const suites = [
   'world-snapshot',
   'intent',
   'tool-shape',
+  'spine-task',
   'reconcile',
   'introspect',
   'windows',

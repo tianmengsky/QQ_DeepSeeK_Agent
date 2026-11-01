@@ -1,3 +1,12 @@
+2026-11-01 版本号 `v137-manual-wake` → **`v138-autonomy`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**把"自由"从一句空话改成一张能用的清单。** 用户读了脊柱提示词以后说："谁看了不迷糊啊，自主性不高诶"——她说得对。原来那段只写"你可以什么都不做，也可以看别处、去 B 站逛一会儿，也可以忽然想起谁"，第一次叫醒 4 秒回 `[SKIP]`，不是不想做，是**没人告诉她手里有什么**。现在 `spineTaskText()` 逐条列出真能做的事，每条都对得上 `allowedToolNames()` 里存在的工具：跟谁说话（`qq_windows` list/say/search）、在群里开口并 @ 人（`qq_send_group_msg`）、刷 B 站（`bili_search`/`bili_subtitle`/`bili_frames` 并分享）、记一件回头要做的事（`qq_intent add`）、整理自己的本子（`qq_memory`，只在自主时间能写）、改昵称/签名（`qq_set_profile`）、改群名片/群名/发公告（`qq_manage_group set_card|set_group_name|notice_set`）、戳一戳/表情包/语音。末尾仍写"也可以什么都不做（回 [SKIP]），但该是因为这会儿确实没什么想做的，不是因为不知道能做什么"。
+
+- 新增 `test/spine-task.test.mjs`（5 项）：**文本里提到的每个 `qq_*`/`bili_*` 都必须在工具白名单里**——这是这份文本最容易犯的错，写了她却调不到，她试一次被拒就再也不试。另外钉住「[SKIP] 仍允许但不能是主建议」「快照原样在最前」「"外面 ≠ 房间，只有 say 才真发出去"必须在」。
+- 三件她"想得到但做不到"的事，明确记在案（不写进提示词，免得她照着试）：**发说说**（qzone 未实现，计划书 M5）、**退群**（QQ MCP 没有该 API）、**主动发好友申请**（只有处理收到的申请，且 profile 未授予 `handle_request`）。
+
+验证：`spine-task 5`、`proactive 23`、`world-snapshot 8`、`memory-context 42`、`logic 197`；`--fast` 1083 项通过，仅既有 `lifecycle:untilChecked` 失败（干净 worktree 同样失败）。为什么该升：她这一轮能做的事变了，是线上行为变化，不是文案。
+
 2026-11-01 版本号 `v136-tool-shape` → **`v137-manual-wake`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 **手动叫醒一次，然后把"她为什么不说话"查清楚了。** 加 `POST /qq/onebot/control {"proactive": true}`：立刻回 202、后台真跑一轮，跳过"到点没到点"，但**不跳过**睡觉时段与每日额度。第一次叫醒她也是沉默（4 秒、输出 4 个 token、回 `[SKIP]`），随后在会话转写里找到原因——注入的还是心跳那句"顺着当前话题表达反应"，可她的时间里根本没有话题。改成【这是你自己的时间】后，第二次叫醒她读了群 946719566、用 `qq_windows say` 在那边留了一句"全紫是有点抽象，但也算凑齐了个寂寞"，`outbox` 回执 `SUCCEEDED`、`onebot_id 1592748199`。
