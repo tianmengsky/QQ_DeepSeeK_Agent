@@ -1,3 +1,16 @@
+2026-11-01 版本号 `v144-unlimited` → **`v145-learned-silence`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**把"她会学习"接到三个真地方：记账、看见、收嘴。** 之前 `frequencyFactor()` 早就算好了四档，但 `proactive` 行记的是"她自己时间那一轮"（`conversation='self:account'`），不是"她对某个群说了一句"——所以 `proactiveHistory('group:x')` 永远是空的，学习没有落点；而且 0 也被 `Math.max(0.05, factor)` 兜成了 0.05，再加上她现在能对任意窗口 `say`，权重根本管不住嘴。
+
+- `lib/store.mjs`：新增 `selfMessagesSince({ since })`，按会话分组返回她这段时间发出去的消息。
+- `lib/application/proactive.mjs`：`#spineTick` 开口后，对每个真正收到她消息的目标补一行 `kind='say'` 的 `proactive`（`idemKey='spine:<ts>:<目标>'`），`settle()` 随后按目标的 15 分钟窗口写 `replied`/`quiet`；新增 `learningFor(conversation)` 作为"按目标学"的唯一读取口，并把它接进世界快照。
+- `lib/application/world-snapshot.mjs`：每个窗口多一句事实——`（最近 3 次你在这儿开口，没人接）` / `（最近 4 次你在这儿开口，2 次有人接）`。只给次数，不给"该不该去"。
+- `lib/delivery/self-send.mjs`：`factor === 0` 的目标直接返回 `HELD` + "这儿最近 N 次你开口都没人接，先别急着去"，一条都不发；别的目标不受影响。
+- `lib/agent/execution-scope.mjs`：她自己的回合里，`qq_send_group_msg` / `qq_send_private_msg` 打到 `factor === 0` 的目标同样拦下（否则按住 `say`、换个工具照样发过去，学习就是摆设）。只拦自主回合，正常聊天不受影响。
+- 计划文件：`docs/reports/PROACTIVE_LEARNING_PLAN.md`（写的顺序、边界与验证都在里面）。
+
+验证：`proactive-learning 4`（新）、`proactive 23`、`world-snapshot 8`、`windows 16`、`tool-scope 6`、`memory-context 42`、`bug-regressions 55`、`self-model 9`、`logic 197`。为什么该升：她"要不要去某个地方说话"这个决定，第一次真的会随对方的反应改变。
+
 2026-11-01 版本号 `v143-share-shape` → **`v144-unlimited`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 **撤掉"每天最多 4 次"这个人造上限。** 用户原话："拒绝每日4次限制，以后非我要求，不许频率设限。" 这个数字从来没有依据：它既不是她的判断，也不是世界的边界，只是我替她决定"说得够多了"。现在 `proactiveDailyMax` 默认 **0 = 不限**，`dailyAllowance()` 把那三处闸门统一成同一个判断，`/status` 的 `today.budget` 在不限时显示 `Infinity`。
