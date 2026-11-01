@@ -11,6 +11,7 @@
 - 唤醒时间通过 lib/conversation/activity.mjs 统一管理；poke 的窗口也写共享 SQLite 的 qq-bridge:speech:<会话>，重载后恢复。不要在新入口另写计时策略。
 - pokeReplyMode 默认 wake；agent 仅作兼容开关（会合成消息提交 DSH），text 只回固定文案。改默认前先确认"戳一下就回一句"不是想要的效果。
 - 默认值和 desktop profile 的 awakeMs 均为 60000；awakeMs: 0 是显式关闭（wake 模式只剩回戳）。
+- **主动频率不设人为上限**（用户 2026-11-01 原话："拒绝每日4次限制，以后非我要求，不许频率设限"）。`proactiveDailyMax` 默认 0 = 不限；以后不要在主动层加"每天 N 次""每小时 N 次"这类闸门，也不要把它们写成默认值。能让她少说话的只有两种力量：她自己从回应里学到的（对方不感兴趣就降频，`frequencyFactor`）和睡觉时段。要加限制必须由用户当场提出，并在 README 与这里同时写明理由。
 
 ## 回复投递
 

@@ -1,3 +1,13 @@
+2026-11-01 版本号 `v143-share-shape` → **`v144-unlimited`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**撤掉"每天最多 4 次"这个人造上限。** 用户原话："拒绝每日4次限制，以后非我要求，不许频率设限。" 这个数字从来没有依据：它既不是她的判断，也不是世界的边界，只是我替她决定"说得够多了"。现在 `proactiveDailyMax` 默认 **0 = 不限**，`dailyAllowance()` 把那三处闸门统一成同一个判断，`/status` 的 `today.budget` 在不限时显示 `Infinity`。
+
+- `lib/config.mjs`：`proactiveDailyMax` 默认 4 → **0**，注释写明用户原话与"频率只该由她自己学到的回应率和睡觉时段决定"。
+- `lib/application/proactive.mjs`：新增导出的 `dailyAllowance(config)`（≤0 视为不限），替换三处 `Number(config.proactiveDailyMax) || 4` 的硬编码兜底。
+- `AGENTS.md`：在「发言与唤醒」里立规矩——主动层不许再加"每天 N 次""每小时 N 次"这类闸门，要加必须由用户当场提出并写明理由。
+
+验证：`proactive 23`。为什么该升：她一天能主动说几次，这个行为变了。
+
 2026-11-01 版本号 `v142-repertoire` → **`v143-share-shape`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 **她会"分享"了，但分享里没有链接。** 她醒来刷到一条深海视频，主动发到群里：「刚才刷到个深海的，冥河水母。暗得像块破布飘过去，还发光」——看到的人不知道她在说哪条。翻了三天她自己的 1390 条发言：**带链接的 0 条**，中位数 16 字、均长 19 字。也就是说"分享"这件事在她身上从来没有形状，她只会说话，不会递东西。
