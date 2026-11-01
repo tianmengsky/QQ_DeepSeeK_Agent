@@ -238,4 +238,48 @@ assert.equal(badBody.statusCode, 400);
 assert.equal(badRig.state.enabled, true);
 passed++;
 
+// —— 手动叫醒一次：`{"proactive": true}` ——
+function proactiveBody() {
+  return JSON.stringify({ proactive: true });
+}
+
+const calls = [];
+let release = null;
+const pending = new Promise((resolve) => { release = resolve; });
+const wakeRig = controlRig();
+wakeRig.state.proactive = {
+  tick({ force }) {
+    calls.push({ force });
+    return pending;
+  },
+};
+const wake = fakeResponse();
+await wakeRig.handler(fakeRequest('/qq/onebot/control', {
+  method: 'POST', headers: { host: 'h' }, body: proactiveBody(),
+}), wake);
+assert.equal(wake.statusCode, 202, '叫醒是后台任务，接口立刻回 202');
+assert.deepEqual(calls, [{ force: true }], '手动激活必须 force，否则没到点就什么都不做');
+
+const twice = fakeResponse();
+await wakeRig.handler(fakeRequest('/qq/onebot/control', {
+  method: 'POST', headers: { host: 'h' }, body: proactiveBody(),
+}), twice);
+assert.equal(twice.statusCode, 409, '上一次还在跑时不许连点');
+assert.equal(calls.length, 1);
+release({ ran: true, action: 'none' });
+await new Promise((resolve) => setTimeout(resolve, 10));
+
+const again = fakeResponse();
+await wakeRig.handler(fakeRequest('/qq/onebot/control', {
+  method: 'POST', headers: { host: 'h' }, body: proactiveBody(),
+}), again);
+assert.equal(again.statusCode, 202, '上一轮跑完之后可以再叫');
+
+const noLayer = fakeResponse();
+await controlRig().handler(fakeRequest('/qq/onebot/control', {
+  method: 'POST', headers: { host: 'h' }, body: proactiveBody(),
+}), noLayer);
+assert.equal(noLayer.statusCode, 409, '主动层没挂上时要说清楚，不要假装叫醒了');
+passed++;
+
 console.log(`${passed} passed, 0 failed`);

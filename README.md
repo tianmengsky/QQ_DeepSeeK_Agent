@@ -1,3 +1,14 @@
+2026-11-01 版本号 `v136-tool-shape` → **`v137-manual-wake`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**手动叫醒一次，然后把"她为什么不说话"查清楚了。** 加 `POST /qq/onebot/control {"proactive": true}`：立刻回 202、后台真跑一轮，跳过"到点没到点"，但**不跳过**睡觉时段与每日额度。第一次叫醒她也是沉默（4 秒、输出 4 个 token、回 `[SKIP]`），随后在会话转写里找到原因——注入的还是心跳那句"顺着当前话题表达反应"，可她的时间里根本没有话题。改成【这是你自己的时间】后，第二次叫醒她读了群 946719566、用 `qq_windows say` 在那边留了一句"全紫是有点抽象，但也算凑齐了个寂寞"，`outbox` 回执 `SUCCEEDED`、`onebot_id 1592748199`。
+
+- `lib/routes/control.mjs`：`payload.proactive === true` → `state.proactive.tick({ force: true })`，同一进程只允许一次（`manual` 闸），接口回 202 不等结果；主动层没挂上时回 409 说清楚。
+- `lib/prompt/render.mjs`：`heartbeat && isSpine` 时换成【这是你自己的时间】（没有人在等你回答，也没有正在进行的对话；可以什么都不做，也可以 qq_windows / qq_intent / say），不再让它去找一个不存在的对话。
+- `test/panel.test.mjs`：control 段 12 项（新增：`{proactive:true}` 必须 force、连点回 409、跑完可以再叫、没挂上时 409）。
+- 验证：`panel 12`、`bug-regressions 55`、`memory-context 42`、`logic 197`、`self-model 9` 全绿。
+
+为什么该升：这是主动层第一次"真的在线上做了一次决定并说出一句话"，而它同时证明了两件事——闸门是对的（手动也过不了睡觉时段与额度），提示词是错的（同一套代码，换一句注入就从沉默变成开口）。
+
 2026-11-01 版本号 `v135-hot-migrate` → **`v136-tool-shape`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 **一个字段名把 DSH 整个挡在启动门外。** `qq_intent` 的参数表写成了 `inputSchema`，宿主 `tools.register` 读的是 `parameters` —— 这个校验发生在 `apply` 阶段，所以症状不是"这个工具用不了"，而是应用起不来：页面上只有一句"应用无法启动或已意外停止"，堆栈里唯一认得出来的行是 `at new apply (…/lib/bootstrap.mjs:241:11)`。从 v130 上线起，桥接就再没被加载过；`/qq/onebot` 404、`proactive` 表 0 行、主动回合一次没醒，全是这一个字段。
