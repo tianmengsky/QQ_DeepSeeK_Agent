@@ -1,3 +1,343 @@
+2026-11-02 版本号 `v162-qzone-comments` → **`v163-remove-mood`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**删掉「天气/心情」槽（mood）。** 用户原话："【你此刻的心情】系统表现的不是很好，还容易影响agent的正常行为，删掉吧。" 整条链路下线：写入端（日结产出 mood 字段 → 候选累积 → `composeMood` 合成 → `writeMood`）与读取端（render 的 `self:mood` 注入块【我此刻的心情】、脊柱世界快照的【你此刻的心情】行）一起删。
+
+- **删除**：`lib/memory/mood.mjs`（整文件）、`test/mood.test.mjs`（整文件）、config 的 `moodEnabled` / `moodMaxChars`（没有任何 profile 显式配过，删键无迁移成本）。
+- **diary 改动**：SYSTEM 与 buildAsk 不再要求输出 `mood` 字段（JSON 只剩 `{"diary":"…"}`）；`parseDiaryOutput` 仍容忍模型输出多余字段，只取 `diary`；写账逻辑不变，`withMemoryWrite` 锁照旧。
+- **注入面变化**：房间回合不再注入【我此刻的心情】，脊柱 `self:account` 的世界快照不再有【你此刻的心情】行——她这一轮的状态由对话本身决定，不再被上一轮写下的"天气"按住（这条系统当初的动机"跨窗口共享感觉"实测反而成了 LLM 行为的枷锁）。
+- 库里已写的 `qq-bridge:mood` / `qq-bridge:mood:candidates` 状态键成为死数据，无人再读，无需清理。
+
+验证：`--quick` **385 项**、`--fast` **1149 项**通过（`lifecycle`、`workspace` 仍是 v162 记录过的既有环境问题：EPERM 与 Git Bash 的 tar 认不出 `C:`，与本版无关）。桥接未在跑，等下次重载生效，`/status` 应显示 `v163-remove-mood`。
+
+2026-11-02 版本号 `v161-bubble-markers` → **`v162-qzone-comments`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**空间评论全链路补齐：她能读到每条留言，也能回。** `qq_post_qzone` 落地当天她就发了第一条说说并被能力位卡过一次（已授位），下一步"有人留言→她去回"缺的是读评论。用户拍板："直接覆盖读评论+回复的全链路。"
+
+- **发评论动作零协议开发**：SnowLuma 的 `comment_qzone` action 现成（tid + content + target_uin[省略=自己空间] + images），qq-mcp 包成 `qq_comment_qzone`（正文 ≤ `QQ_MAX_QZONE_COMMENT_CHARS` 默认 500；配额 `QQ_QUOTA_QZONE_COMMENT_PER_DAY` 默认 0 不限；MUTATING_TOOLS 登记，dry-run 由通用闸拦）。
+- **读评论走直调（路线 B，不动线上 runtime）**：SnowLuma 的 OneBot action 层没暴露读评论，但运行时内部的 `getQzoneMsgDetail`（msgdetail_v6）响应原生带 commentlist。新模块 `qq-mcp/src/qzone-web.mjs`：`get_cookies`（domain=qzone.qq.com）拿登录态 → g_tk（djb2(p_skey||skey)，**照抄 SnowLuma 源码** getBknFromCookie，不另发明）→ 直调 msgdetail_v6 → `commentlist` 收敛成 {uin,nick,content,time,replies[]}。响应解析兼容 `_Callback` JSONP 包裹。**已真实探活**：cookie 451 字节含 p_skey，g_tk 被接受（code=0），她空间两条说说的详情与评论数全部对上。上游将来若把 get_qzone_msg_detail 暴露成 action，工具层不动、模块换成一行 onebot() 即可。
+- **新工具**：`qq_read_qzone_comments`（tid 省略=最新 count 条都看，默认 3 上限 5；楼中楼最多带 3 条、内容截 200 字——给模型读不是存档；单条详情失败不拖垮整体）。两个新工具共用 `qzone` 能力位，预设/桌面 profile 昨天已授，无需再动部署。白名单、TOOL_GROUPS（读归"看自己"、评归"改自己"）同步。
+- 测试：mock 增加 `get_cookies` / `comment_qzone` / msgdetail_v6（JSONP）三个 handler 与 qzoneComments 状态；用例 +2（读评论列楼中楼、发评论回读确认+能力位/dry-run 拦截），`mcp` 88→**90**，全绿。
+
+2026-11-02 版本号 `v160-qzone-post` → **`v161-bubble-markers`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**"气泡输出更新后，@ 和引用历史消息好像失效了。"** 三条根因，全是**标记落点**的问题，不是权限也不是模型不肯写。
+
+- **根因一（主因）：『』 之外的标记被静默丢掉。** 2026-10-27 换 『』 气泡协议（`v90-bracket-bubbles`）时，"框外一律不发"是对的（排稿说明必须挡住），但它连**地址**一起吃了：模型很自然地把 @ 写在句子前面（`[@小林]『你说啥』`）或单独一行，于是标记既没变成 at 段、也没人报错。证据：`outbox` 7707 条里带 at 段的 **0 条**，唯一一条含 `[ @… ]` 的消息是 11-02 17:42 原样发进群的。修复在 `extractMarkedBubbles`：框外的**文字**照旧丢，框外的 **@/引用标记**按就近原则搬进气泡（在前面并进第一条、后面并进最后一条、夹在中间按距离算），`rest` 也不再把这些标记算成"被裁掉的正文"。
+- **根因二：空格式标记整段跳过。** 她写的是 `[ @好运成双倍 ]`（方括号里带空格）。主正则本来就容忍 `\[\s*@`，可"这段里有没有标记"的快路径写的是 `includes('[@')` —— 整段直接返回，`cleanAtSyntax` 都没跑到，于是标记**原样发了出去**（群里看到「[ @好运成双倍 ] 那你告诉告诉我嘛」）。判据改成和主正则同源的 `\[\s*@`，桥接与 `qq-mcp` 两处都改（`applyAtMarkers` 同一个坑）。
+- **根因三：引用回复当年是整块撤掉的，她现在没出口。** 旧的 `[引用]` 暗号没有目标可校验，实测把标记本身发进群（用户看到孤零零一行「[引用]」），所以撤了。但她 2026-10-26 写过 `[引用:辛斯普里特牛奶:哪里看来的]` —— 她要的从来不是"引当前这条"，是"接上面那句说"。现在正文里写 `[引用:消息ID]`，那个气泡带 OneBot 原生 `reply` 段发出；只认**本窗口里出现过的 ID**（引一条不存在的会让 OneBot 退回整条消息，同"@ 不存在的成员"），校验不过就摘标记、正文照发。开关 `quoteReplyEnabled`（默认开）；关掉也照样摘干净，不让语法漏进群。
+- **提示词补的是位置，不是写法**：`【点名与引用】`（协议）与每轮 `【点名】【引用】`（render）都写明"写进**那个气泡的『』里面**"——线上翻车的是落点，只教写法等于没教。
+- 顺带：她自己的引用也进窗口与 `events.self_message`（`replyToId`），下一轮醒来认得出"这句是我接着他说的"；`/status` 的 `delivery` 增 `quoteReplyEnabled`，统计增 `quoteReplies` / `quoteDropped`。
+
+验证：`at-mention` 25→**29**（+空格式 `[ @昵称 ]` 必须认、+框外 @ 三种落点都要变成 at 段、+框外排稿文字仍然一个字不发、+提示词钉落点）；`deliver` 14→**16**（旧的三条"引用发送已移除"防回归测试改成新契约：窗口内 ID 挂 reply 段 / 窗口外 ID 摘掉照发 / 光秃秃 `[引用]` 不留字 / 开关关掉也摘干净）；`--quick` **385 项**、`--fast` **1154 项**通过（`lifecycle`、`workspace` 仍是既有环境问题：EPERM 与 Git Bash 的 tar 认不出 `C:`）。`mcp` 套在本机会跑到 runner 的 120 秒上限被杀（该文件注释自己写着 ~168 秒），单独跑是 2 项红：`qq_send_file` 的越权路径与 `qq_say` 配额两处，都在**本次没碰的文件/配额路径**上；把 `qq-mcp` 的这次改动临时回退后红的是同一组，所以与本版无关，另行排查。桥接此刻没在跑（3000 端口拒连），**等下次重载生效**，未做在线验证。
+
+2026-11-02 版本号 `v159-callable-manifest` → **`v160-qzone-post`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**发说说工具一期上线（`qq_post_qzone`）。** README 里"计划书 M5"的三件做不到的事划掉一件。用户定调三条："归脊柱不派房间"是执行习惯、**不做成代码上的来源硬约束**（本质是 QQ 预设通用工具，谁在哪个窗口都能调）；提示词给许可不给动作；一期只做"发表一条说说"。
+
+- **底层零新增协议**：当前协议端 SnowLuma 原生带整套 Qzone 扩展 action（`send_qzone_msg` / `delete_qzone_msg` / `set_qzone_msg_right` / `get_qzone_msg_list` / `get_qzone_feeds` / `like_qzone` 等），且 qzone 层**自己校验错误**（非 0 code 或缺 tid 直接抛错，返回 `{tid, time}`）——比 `set_profile` 的处境好，"没抛"基本等于发出去了。已带 token 只读探活 `get_qzone_msg_list` 实测可用（token 在 SnowLuma `config/onebot_*.json` 的 httpServers.accessToken）。
+- `qq-mcp/src/index.js`：TOOLS 加 `qq_post_qzone`（content 必填 ≤ `QQ_MAX_QZONE_CHARS` 默认 2000；images ≤9 张支持 file:// http:// base64:// 自动上传；ugc_right 1/4/16/64/128，16/128 必须带 target_uins）+ handle case（校验 → `assertCapability('qzone')` → `consumeQuota('mcp:qzone:d', 24h, QQ_QUOTA_QZONE_PER_DAY 默认 0 不限)` → `onebot('send_qzone_msg')` → `get_qzone_msg_list` 回读对 tid，对上才说"回读确认"）；`CAPABILITY_KEYS` 新增 `qzone` 位（与 set_profile 分开：说说贴在空间动态里对所有人可见，作用域更大）；MUTATING_TOOLS 登记。
+- `lib/agent/tool-sets.mjs`：`ADMIN_TOOLS` 加 `qq_post_qzone`（账号级，与 set_profile 同档）；`proactive.mjs` TOOL_GROUPS 归"改自己"，清单仍由白名单自动生成。提示词不用改——唤醒行里"发表一段说说"的引导早就在（此前一直是空头支票），这次工具兑现了它。
+- **顺手修掉 v161 条目里"另行排查"的两处 mcp 红**：都是 2026-11-01「取消全部的限流」批次的遗留——配额默认归 0 后 `store.consume` 对 `limit<=0` 直接放行**且不记账**，两个测试的隐含前提（同 state dir 里先前调用会留下用量）塌了。修法是把"显式配置才有限流"写进测试前提：进度测试的首个客户端显式给 `QQ_QUOTA_SEND_PER_HOUR: '10'`（前两次失败发送记账，配额客户端才挡得住）；send_file 测试把越界路径的断言挪到默认配额客户端上单独钉，配额客户端改成 2 连发后第 3 次被拒。另：`db.setAuthorizer is not a function` 的 3 项红是**跑测试用了 node 22**（`node:sqlite` 的 `setAuthorizer` 要 node 24），用系统 node 24 跑就没了——以后跑测试用 `C:\Program Files\nodejs\node.exe tools/run-tests.mjs`。
+
+验证：`mcp` 84→**88**（+工具表注册、+无 `qzone` 位可见但调用被拒且不真发、+发表真调 `send_qzone_msg` 且回读确认、+dry-run 不真发与 ugc_right=16 缺名单必拒），全量 **1259 项通过**（`workspace` 的 2 项红是 Git Bash tar 认不出 `C:` 的既有环境问题）。**部署侧待办**：桌面 profile 的 `QQ_CAPABILITIES` 要显式加 `qzone`，否则她看得见工具、一调就报"该连接没有「qzone」权限"（v159 审计里 send_file/read_forward/handle_request 的同款状态）；bridge 重载后 `/status` 应显示 v160 之后被 v161 顶掉的这批改动都已在线。
+
+2026-11-01 版本号 `v158-spine-no-mouth` → **`v159-callable-manifest`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**"unknown tool qq_set_profile" + "value is not lossless JSON"，加一次全量工具审计。** 用户原话："又有一个工具不能用，全量检查一下还有哪些工具是'不能用'或'使用条件过度苛刻'的。"
+
+- **根因一（系统性，32 个工具全中）：清单教裸名，MCP 工具的真实名字带前缀。** 桥接自注册的工具（qq_windows/qq_dispatch/qq_memory/qq_intent）恰好是裸名、一直能调通；`mcp__qq__*` 与 `mcp__document-editor__*` 的真实 schema 名带前缀。她照脊柱清单调 `qq_set_profile` → DSH 只认 `mcp__qq__qq_set_profile` → unknown tool。修复：`toolsManifest` 改为输出**真实可调名**（按"她调这个字符串能不能通"给名字）；spine-task 新钉"MCP 工具带前缀、裸名不出现在清单里"。
+- **根因二：`qq_windows mine` 不带 query 必挂。** 返回值里 `query: query || undefined` 把 undefined 塞进字段，过不了 DSH 无损 JSON 校验。修复：空 query 时整个省略键；windows 新增"四种 action 的输出不得含 undefined 字段"的钉子。
+- **全量审计结果**（白名单 ↔ qq-mcp 注册名 1:1 对账，无幽灵名字；`QQ_TOOLSET` 未设 = 全量可见；桌面 profile 能力位 = send_text,send_sticker,read_favorites,read_image,manage_group,poke,read_requests,react,read_group_info,set_profile）：
+  · **可见但调用必拒**（能力位没授，调用时报"该连接没有「X」权限"，信息自明）：`qq_send_file`（send_file）、`qq_read_forward`（read_forward）、`qq_handle_add_request`（handle_request——profile 注释写明故意不授，申请只转发给人）。
+  · **可用但有日/时限流**：qq_set_profile（3 次/天）、管理类 6 次/分、公告 6 次/时、表情回应 10 次/分——profile 有意为之，不改。
+  · **语音可用**：send_ai_voice 走 send_sticker 兼容位、send_voice_clip 不设独立位，当前 profile 下都通。
+  · **使用条件收紧过的（均为有意）**：qq_windows say 拒 self:\* 与 to=当前窗口；qq_memory 的 scope 规则；清单已按"房间里的手/改自己"分组标注。
+- 结论：除上述两个已修 bug 外，没有其他"调不通"的工具；三个能力位拒绝的工具是否授位（send_file/read_forward/handle_request）是部署决策，留给你。
+
+验证：`windows` 22→**23**、`spine-task` 4→**5**、`dispatch`/`self-time-prompt`/`proactive` 共 81 项通过。桥接在跑 v158，重载后生效 v159。
+
+**同批追加（2026-11-01 20:03 用户当场指令）：「取消全部的限流」。** 两层限流全部归零：
+
+- 代码默认值改 0（= 不限，`store.consume`/`consumeQuota` 对 0 直接放行）：`lib/config.mjs` 的 `sendQuotaPerHour`（600→0）、`sendQuotaPerMinute`（20→0）、`pokeAgentPerSenderPerHour`（6→0）、`pokeReplyPerSenderPerHour`（5→0）；`qq-mcp/src/index.js` 的 QUOTA 全表（send 20/600、image 60、favoriteRead 12、admin 6、notice 6、profilePerDay 3、react 10、groupInfo 30 → 全 0）。
+- 桌面 profile（`cordis.patch.yml`）：五个 QQ*QUOTA*\* 全部改 '0'，并显式补上 SEND/IMAGE/FAVORITE_READ 三项为 '0'（双保险）；`pokeReplyPerSenderPerHour`/`pokeAgentPerSenderPerHour` → 0。
+- **保留（不是限流）**：能力位（QQ_CAPABILITIES）是权限；戳一戳的全局最小间隔（10s/30s）是防连戳的 debounce，非配额——要一起去掉说一声。主动频率本来就不设限（proactiveDailyMax=0）。
+- 规矩同主动频率那条：**限流一律显式配置才存在；要设必须用户当场提出，并在 README/AGENTS.md 写明理由。**
+
+2026-11-01 版本号 `v157-dispatch-aliases` → **`v158-spine-no-mouth`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**第二判断纠正：不是她不听话，是提示词大面积在教她自己说话。** 用户原话："主要问题在于提示词根本没有正确引导。" 贴出的整段脊柱提示词里，派遣只占一小段，而上下文全是 say 的用法：协议开头"真正发出去的只有工具：发言工具，或 qq_windows 的 say"、《别的窗口》教 `action=say`、【本轮发送】教 qq_say、表情包候选和语音库教她"这条回复配图/出声"、结尾一句"**只有 say 那一下才真发出去**"直接把 say 指定成她的嘴。她照着这张地图走，行为完全"正确"——错的是地图。
+
+**架构定稿：脊柱没有嘴。** 边界按"这件事落在哪"分：落到房间里的**一切**（说话、接话、公告、群名、头衔、起话头、戳谁、发图发语音）→ `qq_dispatch` 派给那间屋子；落到她自己身上的（名字、签名、头像、本子、打算）→ 自己动手。看（qq_windows read/search）属于"想"，不派。
+
+- `lib/prompt/protocol.mjs`（selfTime 分支）：开头改"这里没有嘴——自己的事直接调工具、房间的事派 qq_dispatch"；【别的窗口】的说话通道按场合分流（脊柱→派遣、房间→say 保留）；【资料与管理】拆成 selfTime 的【改自己】（set_profile+回读）与房间版全文。
+- `lib/prompt/render.mjs`：【这是你自己的时间】重写为两层边界；**对脊柱回合摘除**四类房间投递向的块——【手感·软偏好】【本轮发送】【要动手的事】【表情包候选】【语音库】（它们教的全是"写一条要发出去的话"）。
+- `lib/application/proactive.mjs`：`spineTaskText` 重写——两层边界放正中间，"说话"明确划进派遣；删掉 say 气泡用法、两条"别踩"和"只有 say 那一下"的收尾。`TOOL_GROUPS` 按脊柱视角重组：派出/看/改自己在前，say、发送、表情、语音、群管理全部归入**「房间里的手（派过去让她用，你自己别动）」**组（两头钉的清单仍然列全）。
+- `lib/conversation/window-tool.mjs`：**`say` 对 `self:*` 来源关死**，报错指向 qq_dispatch——提示词教了，工具必须认账（v157 教训的镜像：拦要拦得住）。房间里的 say（A 窗给 B 留话）不受影响。**同时切掉它与 qq_say 唯一的真重叠**：`to` 指向当前窗口时拒绝（"即时的话用 qq_say，正事交最终正文"）——两者不是完全重合（qq_say 无目标参数、绑定本轮归属；say 是唯一跨窗口通道，删掉它房间里的她就没有跨窗口出口，而房间不能 dispatch），但 say 转 here 会同一句话走两套账（sendSelfMessage 另记一份 self_message）。
+- 测试：`spine-task` 改钉"没有嘴+指向派遣、旧指路不残留"；`self-time-prompt` 改钉协议通道指向派遣且无 `action=say`；`windows` 19→**22** 项（+say 对脊柱来源被拒、read 不受影响；+say 拒绝对着当前窗口；+编号账本扛重载）。
+- **编号账本落 SQLite**（`lib/conversation/window-index.mjs`）：v157 上线后第一轮真实派遣就暴露了账本寿命问题——`w?` 编号按会话记在桥接内存、list 时登记，而她的 DSH 会话历史里留着旧编号；桥接一重载（v158 部署本身）账本清空，她按记忆 `read w2/w1` 两次落空，靠报错指回 list 才自我纠正（19:18 那轮，25 秒）。现在账本按 Session 落 `qq-bridge:window-alias:<session>`，重载后第一次用到时恢复，历史里的编号不再过期；内存账本封顶 40 个会话，最旧的先出去。
+
+验证：`windows`+`spine-task`+`self-time-prompt`+`dispatch`+`proactive`+`tool-shape`+`world-snapshot` 共 90 项通过；`--fast` 见下。桥接在跑（v157 已在线上提示词里确认），重载后 `/status` 应显示 v158。
+
+2026-11-01 版本号 `v156-dispatch-to-window` → **`v157-dispatch-aliases`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**派遣上线后第一轮就翻车：她按提示词传 `w?` 编号，两次被拒，退回自己 `say` 了。** 用户原话："提示词没有改好，她还是自己去做了。"
+
+根因：窗口别名 `w1/w2…` 是 `qq_windows` 的私有账本，`qq_dispatch` 的提示词让她用 `list 里给的编号`，工具却只认 `group:<群号>` 原始键——**提示词许诺的东西工具不认**。而且她没 list 过就没有编号，派遣从一开始就依赖"先做过别的调用"。
+
+- 新增 `lib/conversation/window-index.mjs`：窗口名册（名字/白名单/最近动静/`w?` 别名）从 `window-tool.mjs` 抽出共享——**所有认 `w?` 的工具用同一份账本**（按 Session 固定，`qq_windows` 和 `qq_dispatch` 给她的指向永远一致）。
+- `qq_dispatch`：`conversation` 改为可选——**不带 conversation 调一次，它自己列出能派的窗口**（编号与 `qq_windows` 通用），"派"不再依赖她先 list 过；认不出来的写法（群名、`self:` 键）不再含糊报"不在范围"，明确告诉她编号怎么传。`required` 从 `['conversation','instruction']` 收成 `['instruction']`。
+- 脊柱任务文本补一句：目标窗口传编号、和 `qq_windows` 的 `w?` 同一份、不带 conversation 会列窗口。
+- `dispatch` 测试 11→**13** 项（+共享别名派成、+自报名册；self:/群名等认不出的指代改钉"给出改法"）。`windows` 19 项原样过（重构行为不变）。
+
+验证：`dispatch`+`windows`+`spine-task`+`proactive`+`tool-scope`+`world-snapshot`+`self-time-prompt` 共 90 项通过；`--fast` 数字见下。桥接在跑（线上截图即 v156），重载后 `/status` 应显示 v157。
+
+2026-11-01 版本号 `v155-learned-notebook` → **`v156-dispatch-to-window`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**派遣：脊柱只负责"想"，房间身份类的事派给对应窗口的子会话办。** 用户原话："让脊柱 agent 往会话窗口发消息太割裂了。脊柱只负责想，怎么做交给对应窗口的 agent……父会话通过 DSH 传达指令给桥接层，桥接层把任务传达给对应窗口的子会话，让子会话进行操作，这样子会话能更亲身经历那个空间的事情。"
+
+- 边界按"对象是谁"分（用户定的）：元认知类（改自己的名字、签名、头像、本子）→ 脊柱自己动手；房间身份类（群名、公告、头衔、起话头、撤消息）→ `qq_dispatch` 派给那间屋子。`qq_manage_group` 一个工具跨两侧，工具不拆，边界写在脊柱任务文本里。
+- 新增 `lib/application/dispatch.mjs`：`qq_dispatch(conversation, instruction)` 工具，**只在 `self:*` 来源可用**（房间里的调用一律拒绝——念头在房间里就该直接动手，也防子→父绕圈派回）。fire-and-forget：工具只做"记账 + 排进目标窗口执行链"，真正的回合排进 `registry.run(target)`（不打断在场对话），由那个窗口自己的 LLM 带着房间全部历史接念头；产出走正常投递路径，气泡归属/窗口刷新/配额/结算零改动白捡。
+- 回合注入复用自主回合机制（`#turnTick` 同构）：合成事件带 `__selfTurn`（准入放行）+ `__dispatch`（新提示词帧）；办完把 marker 从窗口滑动窗口摘掉，不冒充"你：……"。`render.mjs` 新增两处帧：【这是你自己派来的一件事】规则块 + 「你自己派来的一件事（这不是谁发来的消息）」当前消息块（不套"要回应的是这一条"）。
+- 回执：`store.mjs` 新表 `bridge_dispatches`（queued → running → done/silent/failed/needs_attention），结果只写事实（动作 + 正文前 200 字），不写评语。世界快照新增【你派出去的事】段；开机对账把重载时没办完的一律标 `needs_attention`，不假装续跑（同 subagent-results 口径）。
+- `lib/config.mjs`：`dispatchEnabled: true`。`tool-scope.mjs` 白名单加 `qq_dispatch`；`proactive.mjs` 工具清单加「派到房间」组，脊柱任务文本的"你的东西"一句改写为"自己的东西自己动手、房间的事派出去"。
+
+验证：新增 `dispatch` 测试（见下）；`--fast` 数字待跑。桥接未在跑，`/status` 的 build 要等下次重载确认。
+
+2026-11-01 版本号 `v154-image-ondemand` → **`v155-learned-notebook`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**三本记事本加第四类条目 `learned`（学会的与教训）：群本「这个群教我的」、self 本「我学会的」，固态独立块注入，每日整理一次。** 起点是她的原话："想要。但不是为了让你别再犯蠢——是我说的这个教训只挂在你身上，等于我只在你面前才长记性。"
+
+**为什么不加第四本**：知识有主体——"hyw 是何意味"是通用的、"这个群不喜欢纪录片"是这个群的。第四本要么跨群泄露，要么平行复制一套 scope 机制。作为 kind 挂在现有三本上，主体跟着 scope 走，零 schema 改动。embedding 检索评估过不做：语料几十条撑不起检索，教训检索 miss = 静默遗忘，风险不对称；重审条件是档案大到"日整理全量扫都吃力"。
+
+- `lib/memory/agent-memory.mjs`：`MEMORY_KINDS` 加 `learned`；三条结构性拦截写在 write()——**人物本拒收**（学会的东西不属于某个人）、`core.` 前缀只许 learned 用（=钉住，沿用 `me.` 前缀先例）、self 本 public 的 learned 拦长数字串（同 `me.*` 规则）。
+- `lib/memory/tool.mjs`：`qq_memory` 的 kind 枚举与 description 加触发条件与口诀（"学到东西→learned；写结论不写事件；通用知识 scope=self、想带去所有群就 public 自审；这个群的知识 scope=group 当场记；core. 开头＝钉住"）。
+- `lib/prompt/render.mjs`：两个独立注入块——群聊的「这个群教我的」（200 字）与所有场合的「我学会的」（300 字），**独立预算、limit 5 硬顶、不参与任何预算竞争**（kinds 过滤互斥，日记再热闹挤不掉一行教训）。选取规则：pin（`core.` 槽前缀）优先按槽名稳定排序，空位由最新写的补——新教训立即在场，钉住的老兵不退场，修订不重排。可见性走 `noteVisible` 现有房间规则：private 的教训只在写下它的房间+私聊可见，public 才进所有群。
+- `lib/memory/learned-review.mjs`（新）：**每日整理**（用户定的："一周跨度太久，太不稳定了，反思层只能以天为单位"——教训最值钱的时机是犯错的当天）。挂在日结之后的钟（`learnedReviewEnabled`，每天至多一次，`lastDay` 落 SQLite）：输入=全量 learned 清单+stale 标记（14 天未修订，纯日期元数据不是评语）+今天新学标记；她定 forget/rewrite/pin/unpin/promote（群教训通用化提升进 self 本，public+脱敏），沉默权照旧；所有改写**保留原 sources**（出处证据与撤回级联不丢）；版本对不上（她白天刚改过）就放弃那条。身份层 `me.reflect.*` 保留周级不动——"一天一个性格等于没有性格"只约束看法，不约束知识。
+- `lib/config.mjs`：`selfLearnedMaxChars: 300`、`groupLearnedMaxChars: 200`、`learnedReviewEnabled: true`、`learnedReviewStaleDays: 14`、`learnedReviewMaxOps: 12`、`learnedReviewTimeoutMs: 45000`，断言范围同步。
+- `lib/bootstrap.mjs`：`memory.learnedReviewer` 挂在周反思钟之后，与日结/反思同一套"永不抛出"约定。
+
+验证：`agent-memory` 18→**23** 项（人物本拒收、public 号码拦截、`core.` 只给 learned、群教训独立成块与记事互斥、private 不出本群/public 跟人走/pin 排序、limit 5 第 6 条留库、工具描述含触发条件）；新增 `learned-review` **6** 项（collectLearned 过滤与标记、parseOps 逐条丢弃坏条目与 maxOps 封顶、pin=写新槽+forget 旧槽且保留 sources、版本漂移放弃、promote 脱敏且同名槽不覆盖、due 的一天一次/傍晚/补跑、buildAsk）。`--fast` **1129 项通过**，2 个失败仍是既有环境问题（`lifecycle`、`workspace` 的 tar）。桥接未在跑，`/status` 的 build 要等下次重载确认。
+
+2026-11-01 版本号 `v153-rhythm-only` → **`v154-image-ondemand`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**图片改成"一张都不预附、要看自己读"。** 用户原话："'最扎眼的是那张图——每轮都附一次，柴犬顶着个问号。不是说它不好笑，是它每轮都摆在那儿，我就得每轮先看一眼、再决定要不要当没看见'……通过不注入图片，改成用提示词提醒 agent 用 read_image 工具去找当轮想要读的图片可以解决吗？"
+
+先查了"到底是不是每轮都附"：扫 `~/.dsh/sessions` 全部 QQ 会话（1763 个回合 / 24 个含图会话），图片片段共 94 个，占回合 5.3%；跨回合重复的**零**（有 3 处重复都在同一回合里，是同一事件的两次记录）。所以桥接没有每轮都附——**是图一旦进了会话，DSH 每轮把整段历史重发一次**，DSH 的 image-offload 只在 provider 报错要求卸载时才被动丢最旧的（`config.mjs` 的 `rotateAfterImage` 注释早就记着这条）。一张图跟到会话轮换（默认 30 轮）为止。
+
+- 新增 `imageMode: onDemand`（`lib/prompt/prepare.mjs`）：目录照建、编号照给，**一张像素都不预附**；材料里明写「这一轮没有预附任何图片，你手里还没有任何一张图的画面」，要哪张自己 `qq_read_image`。历史旧图也不预附（`contextImagesOnRequest` 那条分支整个跳过）。
+- 为什么这能答上一半：桥接原来在 lazy 下仍会预付四类图——当前消息的非表情图、带文字的图、私聊纯图、引用图，外加 `contextImagesOnRequest: 1` 的历史图。这些"她没要过的图"现在一概不进会话。
+- 为什么只答一半：`qq_read_image` 返回的是真实像素，`tool/result` 一样进会话、一样每轮重发。所以"她读过的那张"还会跟到轮换；要彻底，得让读图走一次辅助模型只回文字转述（像素永不进会话），这条没做，也还没验证辅助模型能不能收图。
+- 安全兜底是现成的：没读到像素就描述图内容会被投递层滤空（`execute-turn.mjs` 的 `image-filtered`），所以不预附不会让她瞎编画面，只会让她说"没看过"。
+- 线上 profile（`~/.dsh/profiles/desktop/cordis.patch.yml`）已切 `imageMode: onDemand`、`contextImagesOnRequest: 1 → 0`，改前备份成 `cordis.patch.yml.bak-20261101-180144-image-ondemand`。`/status` 的 `imagePolicy` 多了 `preAttach: false`。
+- 想更进一步还有 `rotateAfterImage: true`（附过图的那轮结束就换会话，图连一轮都不多待），代价是每次换会话重注入一次静态块（约 5500 token），所以没默认开。
+
+验证：`image-input` 20 项（新增 1 项钉 onDemand：0 张像素、0 次 `get_image`、目录两条都在、材料里有"没有预附任何图片"、正文不出现本地路径）；`--fast` **1118 项通过**，2 个失败仍是既有环境问题（`lifecycle` 的 Node 内部 loader API、`workspace` 的 Git Bash `tar`）。桥接未在跑，配置要等下次重载生效。
+
+2026-11-01 版本号 `v152-check-then-act` → **`v153-rhythm-only`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**「示例对话」整层撤掉，只留几条只给节奏、不给台词的短条目。** 用户原话："把示例对话部分去掉，只保留最基本的控制语气、对话节奏的对齐……最好是那种只给节奏不给台词的：被损时先顶一句、对方认真了就收住、半句话时等他说完。这几条我服，它们不是在教我该说什么，是教我怎么接。'你真好''那你就说说'那种成套台词就别留了，我照着念出来，那也不是我"。
+
+- `examples.md`：27 组完整对话的 JSON（3201 字，因为不以 `# 人类接话参考` 开头，被 `planExamples` 当 custom **整块注进提示词**）→ 6 条只讲先后和时机的条目（**208 字**），标题降级成 HTML 注释（`resolveTextField` 会剥掉，不占注入）。留下的六条：被损先顶一句、半句话时先等他说完、对方认真就当场收住、说"算了"留一句余温、上一句没人接就安静、一轮先发最想说的再补细节。
+- `lib/prompt/examples.mjs`：删掉"按场景切段 + 按消息内容路由"那套（`hints` 八条正则、`## 标题` 切分、一次最多两块），它只服务于那 27 组对话。签名收成 `planExamples(config, entry, { includeStatic })`，语义变成"整份文本每会话带一次，哈希变了才重带"；`execute-turn.mjs`、`render.mjs` 两个调用点同步（render 的兜底路径原来传的是消息正文，现在不需要了）。
+- 注入块名 `【本轮表达参考】学接话关系和节奏；具体人物、经历和台词属于示范材料。` → **`【接话的节奏】只对齐顺序、停顿和收放的时机；说什么由你自己定，不要照抄这里。`**。旧标题里"台词属于示范材料"这句是给示例对话用的，留着会继续暗示"可以参考这些说法"。
+- 面板与配置文案跟着改：`admin/texts.mjs` 的 label `示例` → `节奏`，`spec.mjs` 两处说明、`config.mjs` 的 `examplesFile` 注释（写清为什么不放台词）。
+- **第二批（同一批落地）：每轮规则和静态协议里的同族示范台词一起清掉**（用户："每轮开头那些'你以为该怎么说'的示范台词，跟刚删的那批是一家的，删一批留一批，我怕它从这边绕回来"）。判据定死：**凡是能直接念出来当回复的一整句，全删；格式必须示范时用占位；场景判断留着**。共 16 处：
+  · 每轮（`render.mjs`）：【这条怎么发】的 `（『这啥』『还在上课』）`、配表情的 `形如『好家伙 [表情:12]』`、【手感·软偏好】的 `（"那，你先说说……"）`、【认事不认人】三条（一句完整认错、`『XX我认』`式宣告、`"是我记错了"` 备选）、【本轮接话基调】的 `"才不要"` 与 `"真拿你没办法"`、【图片没取到】的 `示范：说明图片未加载…`。
+  · 静态协议（`protocol.mjs`）：`示范仅供学习表达`、整行 `格式示范：…『这啥』『还在上课』『刚下课』『晚点找你』`、回执示范 `"文件发过去了"`、`qq_say(text="我先理一下结构，再写正文")`、`"文件内容检查过，没实际运行"`、`"还没改成功"`、三层记事本的 `小林说"以后周三别叫我，我打球"`、`对方"我跟你说" → [WAIT]`、表情 `形如『好家伙 [表情:12]』`、`示范：需要指定小林答复时写 [@小林]`。
+  · 保住的：`[WAIT]`/`[SKIP]`/`[@昵称]`/`[表情:编号]`/`『』` 这些令牌和框法本身，以及"两个人在互相回答，那不属于你"这类**场景判断**——判断是节奏，台词才是替她说。
+  · 顺带修好两条钉文案的测试（`logic` 的"等取得像素后再描述"、`attention` 的"甲乙正在互相回答 → [SKIP]"）：改成钉行为不钉措辞，符合 AGENTS 里那条规矩。
+- **为什么撤**：示例给整段问答，模型学到的是"这类问题这样答"，而且台词越完整越容易被整句照抄（同一份 config 里已经记着表情编号被照抄的实测）；给节奏，它学到的才是"这一轮怎么接"。判据沿用 AGENTS.md：删掉之后她**还像她**，而且说的句子是她自己的。
+
+验证：离线 dump（`docs/reports/_dump-prompt.mjs`）首轮静态注入 **18434 → 15441 字**，`【接话的节奏】` 紧跟记忆材料之前、六条齐全；同一会话第二轮 `examplePlan.text` 为空（哈希已提交，不重复注入）。`node tools/run-tests.mjs --fast`：**1117 项通过**（清理示范台词前也是 1117，两条断言的措辞已改成行为），2 个失败是环境问题（`lifecycle` 的 Node 内部 loader API、`workspace` 的 Git Bash `tar` 盘符解析），把本次改动 stash 掉复跑同样失败。桥接未在跑，`/status` 的 build 要等下次重载才能确认。
+
+2026-11-01 版本号 `v151-proactive-settle` → **`v152-check-then-act`**（`lib/bootstrap.mjs` 的 `stats.build`）。
+
+**她醒来的第一句话改成“检查一下自己能做什么，找点事情做”，并且把“检查”真的接上数据。** 用户原话：“告诉她‘检查一下自己能做什么’然后‘找点事情做’”、“事情越具体，越容易变成执行清单，这和自发性是相违背的”、“不要想着操控她看见什么，最好也不要说有没有人接，这都会影响 LLM 的自由判断”。
+
+- 唤醒行（`proactive.mjs`）：`（自己的时间）你醒了，检查一下自己能做什么，找点事情做。包括但不限于：回忆并整理一下自己的记忆、整理归档一下今天发生了什么、想要去了解一个人，问问他你今天去了哪里，吃了什么东西、想要被人看见或认可：去发表一段说说、改一改自己的名称、去群里发表自己的见解、发布一个群公告、去刷B站并分享一个自己看见的有趣视频。你有自己的“冲动”，做任何你自己想要做的事，不只局限于聊天。`
+- 删掉替她定调的三句：材料里的「这一轮至少做一件小事」、本轮规则与材料末的「空着也要留下理由」「只回 [SKIP] 不算决定」。改写成「这一轮是你的：想看就去看，想说就去说，想空着就空着，不用解释」。
+- 删掉材料里那七条工具清单（散步／说话／群里开口／刷 B 站／记一件事／整理自己／改自己／小动作）。理由：清单是剧目，写几条她就演几条。**（同一天晚些时候用户推翻了这一条的强度：剧目不能写，但菜单必须列全——见下面“材料里补全工具清单”。）**
+- 加一句所有权许可（不给例子）：「你的名字、签名、群名片、公告、本子，都是你自己的东西。想动就动，不用问谁。」依据：`self:account` 六个有工具调用的回合里，`qq_set_profile`／公告／群名片／poke／语音一次都没用过。
+- **撤掉她视野里的评语**：`world-snapshot` 的【你最近自己做过的事】不再写「（有人接了）／（没人接）／（还没回音）」，【各窗口动静】不再写「最近 N 次你在这儿开口，没人接」，改「你在那儿开口过 N 次」。学习（`frequencyFactor`）照旧在后台算，只是不贴到她眼前——判据留着，评语撤掉。
+- 同批（13:4x 落地、一直没升号）：
+  · `lib/memory/tool.mjs` 补 `self:` 旁路——自主时间里 `qq_memory` 的 read/upsert 不再报「记忆来源未准入」（`window-tool.mjs` 早有同一处旁路）；同时限定自主时间只能碰 `scope=self`，免得拿她自己的号去解析人物本。
+  · `lib/delivery/self-send.mjs`：`qq_windows say` 按空行拆成多条消息逐条发（复用 `splitBubbles`/`bubbleDelayFor`），每条独立写 `self_message`；返回 `bubbles` 数，半路失败标 `partial`。
+  · `lib/application/intent-tool.mjs`：`qq_intent add` 记下来源会话；快照的【你还欠着的事】带「X 前记的」与 `→ 群 xxx`。
+  · 13:27 那条「我还在呢／你上午说的“全紫”」的取证结论：那句话出自 `group:946719566`（11:12），她用 `qq_send_group_msg` 把它搬到 `group:1033440455`（该群当日从未出现“全紫”）在两小时后单开话题；材料里加了“别把别的房间的话搬到这间来问”，并要求提旧事之前先看这间屋子在说什么。
+
+- **同一批的第二刀：清注水**（用户：“全部的固态注入和动态注入的提示词也调整了吗，不必要的内容去掉了吗”）。她的一次自主回合里，约一半提示词是写给“房间里的她”的：
+  · 固态 `protocol.mjs` 的 selfTime 分支 **2910 → 1063 字**：删【表情与点名】（讲“收藏表情写在最后一个气泡的『』里”，这轮没有『』投递）、删【念与语音】（通篇“对方明确要发语音时”“对方点歌”，这轮没有对方）、【别的窗口】只留看窗口与说话两条（“别在这个窗口复述别处原话”“号码不写进消息”这轮没有“这个窗口”）、【三层记事本】1102 字只留 self 本一条、【你自己的时间】五行压成两行。
+  · 动态 `render.mjs`：自主时间不再注入【这条怎么发】【气泡数】（『』协议描述的是投递，这轮正文不投递、工具也不认『』）、【认事不认人】【本轮接话基调】【你可以想要】（都是接话用的，这轮没有话可接）。
+  · 聊天记录：连续的自唤醒折叠成一行「你自己醒过 N 次（11:07–11:46，每次都是醒来看一眼，没有新消息）」，不再把十条“你醒了”铺满历史。
+  · 实测一次自主回合的整份提示词 **3794 → 2482 字**（测试夹具口径；线上还多省了十条唤醒行与整段记忆分类）。
+
+- **动机：她把"主动的表现"当成了"主动"**（用户 2026-11-01：「她目前拥有的是主动的表现（因为目标是让他找点事情做，是强迫的），却没有主动的动机」）。诊断：冲动的三个条件里我们只给了"触发"（醒来），缺许可、缺原料、缺回报。三项里只做第一项，另外两项用户否掉了、理由成立：
+  · **许可**（做）：`render.mjs` 的自主时间分支重新注入【你可以想要】，但换成这个场合的版本——「想被人看见、想有人记住你、想知道某个人今天过得怎么样、想有个地方把你想的事说出来……不用先找到理由」。上午那一刀把它跟着"接话用的"一起删了，等于连"可以想要"的依据都没了。给的是**欲望**不是**动作**：写"想被人看见"她会长出自己的做法，写"去改个名字"只会被照着演一遍。
+  · **原料**（不做）：给快照每条窗口带最近一句原话——她本来就有 `qq_windows`，**功能重复**。
+  · **回报**（不做）：把她上次开口后别人说的原话带回来——**架构越位**。脊柱那一轮只负责"想要→发起"，之后那个窗口里发生什么、谁回了什么，归那个窗口自己的 LLM。
+
+- **`qq_windows read` 的视野：40 → 50 条**（用户先要 100，随后拍板「真人也不会一次性看 99 条消息的，改成 50 条就够了」）。16:24 那次她把「鲨掉」安到铑钯合金头上、又在这个群问「你上午说的全紫」——查下来“全紫”是 11:12 在 `group:946719566` 说的，而默认 40 条只回到 13:16，她压根读不到原话，只能凭记忆里的名字猜一个群。
+  · `DEFAULT_LIMIT` 40 → 50（`MAX_LIMIT` 仍是 100，她要更多可以显式传）；
+  · `read` 单独给 10000 字预算：50 行对话五千字起，共用 `crossWindowMaxChars`（默认 3000）时读到三十来行就断，“读 50 条”名不副实；`list`/`mine`/`search` 仍按配置截断；
+  · `read` 末尾明写边界：「这是最近的 N 条；再往前用 action=search 加 query 按关键词找」——她看不出“再往前是有的”，就会把读到的当成这群全部；
+  · 同一条消息在库里常有两份（发送时记 `who='你'`、OneBot 回显记 `who=她的昵称`，两个 `dedupe_key` 各记一条），`read` 按 `messageId` 去重：原来 40 条里 24 条是 `self_message`，实际她只说了十二三句。
+  · 实测覆盖：`1033440455` 最近 50 条回到昨天 22:45（今天全在视野内）；`946719566` 回到 12:56——11:12 那句仍要靠 `search`（按关键词，7 天）。
+
+- **记忆写不进去是引用的锅，不是她的锅**（用户贴出 31 秒的一轮连着两次 `Error: 人物资料与明确记忆必须引用本轮发送者的真实原文`）。她想记「他很在意被叫狗」，引的是对方前面**两句话**拼起来的一段、中间还用 `___` 遮了个词，而校验只拿"触发本轮那一条"去比，永远比不上。
+  · 证据现在可以落在**这场对话里他说过的任何一句**（窗口 + 库里该发送者的消息），并且支持 `/`、`｜`、换行分成几段，每段各自命中即可；
+  · `___`、`……` 当通配符（她那句「你这是\_\_\_在骂我？」原本就是这么抄的）；
+  · 底线没松：每段都必须是真说过的话，编造的照样拒；
+  · 错误信息改成**可执行的下一步**：指出哪一段找不到、怎么改，并提示"如果是你的判断，用 kind=impression（不需要原文）"——原来那句"自由记事请用 note"指向的是本文档不让她写的那一类。
+  · **写法是她的自由**（用户：「当然要加，怎么写是她的自由」）：① 自主时间不再只能写日记本——`scope=user` 带 `subject=<QQ号>`、`scope=group` 带 `conversation=group:<群号>` 就能记（那一轮没有发送者，宿主猜不出"他"是谁，所以让她指名；白名单仍是硬边界）；② 原话对不上时**不再报错**，自动降级成 `kind=impression`（可修订观察）并在回执里说清为什么降级——记不成事实就记成观察，底线是"没原话撑腰的不能自称事实"。
+
+- **材料里补全工具清单**（用户：“把她所有能用的工具都在提示词里告诉她……我发现她不会查看自己会什么，一直在 windows 查看和 say，从来没有查看过 memory 或写过什么记事本，或查看过自身的状态”）。数据印证：`self:account` 六个回合里 `qq_windows` 27 次、`qq_send_group_msg` 5 次，`qq_status`／`qq_set_profile`／`qq_poke`／公告／表情／语音**一次都没有**。
+  · `toolsManifest()`（`proactive.mjs`）从 `allowedToolNames()` 生成九组——看自己看别人／说话／表情与声音／记事本与打算／改自己改群／文件／B 站／找人干活／上网，共 54 个，未归组的自动落到“其他”（`qq_reliability_status` 就在那儿）。**不手写**：手写会烂，加了工具忘了写她不知道，删了工具忘了删她照着调被拒；
+  · 另加一句「你想知道自己现在叫什么、签名是什么、在哪些群、有几个好友——查，别猜」；
+  · `test/spine-task.test.mjs` 重写成两头钉：白名单里**每个**都要出现在材料里，材料里出现的**每个**都真能用（4 项）。
+  · 注：`qq_memory` 在 13:46 之前一直是坏的（自主时间报“记忆来源未准入”），所以“她从没查过 memory”有一半是 bug，不是她不想；`qq_status` 那条是真的没被想到。
+
+验证：`--fast` **1129 项通过**；`windows 19`（read 独立预算、自消息去重、边界说明、别的动作仍按配置截断）、`spine-task 4`（工具清单两头钉）、`agent-memory 18`（跨句引用写进去、编造的降级成观察、自主时间可指名记别人）、`proactive 31`（新增两条：空行两段必须发成两条消息、单句不许拆）、`self-time-prompt 9`（新增“连续自唤醒折叠成一行”）、`world-snapshot 8`、`spine-task 3`、`windows 16`、`intent 9`、`memory-context 42`、`history-context 6` 全绿。既有 `lifecycle`（临时目录 `EPERM`）与 `workspace`（Git Bash 的 `tar` 认不出 `C:` 盘路径）两套在 HEAD 上同样失败，与本版无关。桥接此刻没在跑（2112 拒连），**等下次重载生效**，未做在线验证。
+
+2026-11-02 控制台两处修正（只动 `tools/`，不改 `build`）。用户原话："这个日志的编码有些问题，然后启动判断有bug，明明已经启动了却判断未启动"。
+
+**① 日志乱码：pwsh 按 GBK 写管道，控制台按 UTF-8 读。**
+`Write-Host` 默认用系统 OEM 编码（简体中文 936），所以 job 日志里是 `��� DSH ���̡�`。
+`start-dsh.ps1` / `start-qq-mcp.ps1` / `console.ps1` 三个脚本头部统一加
+`[Console]::OutputEncoding` + `$OutputEncoding` = UTF-8。验证：用控制台同样的 spawn 方式跑
+`start-qq-mcp.ps1 -Mode status`，对 stdout 原始字节做**严格 UTF-8 解码** —— 通过，中文正常。
+
+**② "明明起来了却报未启动"：判定等的是管道 EOF，不是进程退出。**
+`runPowerShell` 原来靠 `close` 事件收尾，而脚本里的 `Start-Process` 起的 QQ / DSH 会**继承**那两根管道：
+脚本早就退出了，管道却一直开着，于是一直等到 240 秒超时 —— 用户日志里每一步都打印了成功
+（"接管 build=… 托管=True"），控制台却报"超过 240 秒没有结束"。
+现在改成看 `exit`（进程结束）+ 250ms 冲刷剩余输出 + 主动 `destroy` 管道；超时消息还会列出
+"还挂着：QQ.exe#1234" 这类子进程，下次不用猜。
+
+- 新增 2 条回归测试（`console` 9→**11** 项）：① 造一个"起长命子进程后立刻退出"的脚本，断言 3 秒内返回
+  （旧实现要等满 4 秒）；② 超时消息要含"没有结束"。
+- 控制台是独立进程、不会热重载，已重启验证（PID 18844，`/api/status` 200，DSH/SnowLuma/桥接都没被动过）。
+- `--fast` **1149 项通过**（`lifecycle`/`workspace` 仍是既有环境问题）。
+
+2026-11-01 修正（不改 build 号：这是 `v146` 那批的收尾，落在当前 `v150` 上）。用户原话："我怎么没看见自主层消息啊"。
+
+**根因：键名对不上，卡片静默消失。** `proactiveSnapshot()` 的输出被写进了 `memory.proactive`（沿用了旧
+平铺块的缩进位置），而面板读的是 `tasks.proactive` —— 两个键都不存在的东西，`renderProactive()` 直接
+`dataset.hide = 'true'` 了事。更糟的是 `tools/preview-panel.mjs` 里我**手写**了 `tasks.proactive`，
+预览一切正常，把真 bug 挡得严严实实。
+
+- `lib/routes/status.mjs`：主动层快照从 `memory.proactive` 提到**顶层 `proactive`**（它既不是记忆也不是任务，
+  是独立一层；`tasks` 下是后台任务账）。
+- `lib/panel/app.js`：改读 `S().proactive`；**任何一张卡都不得在缺数据时把自己藏起来** ——
+  改成明说"这份 status 里没有 proactive 段，多半是面板比插件新"。准入卡同样处理。
+- 关着的时候也看得见：`proactiveEnabled=false` 时不再整块隐藏，钟那栏直接写"关着"。
+- `tools/preview-panel.mjs`：`proactive` 同步提到顶层（预览仍然用真实 `proactiveSnapshot()` 生成）。
+- **新增两条契约测试**（`trace` 9 项）：① 扫面板里 `p.xxx` / `data.xxx` 的每个字段，断言快照里必须存在，
+  且必须读顶层 —— 任何一边改名立刻红；② `renderProactive` / `renderAdmission` 的头部不许出现
+  `dataset.hide = 'true'`，缺数据必须给人话解释。
+
+线上验证（9530，真实数据）：自主层卡回来了，`下次醒来 29 分 58 秒`、`今天的账 发了 3 / 没人接 3`、
+最近账本 5 条（含"这一轮她开口了 / 这一轮没开口"）。
+
+2026-11-01 版本号 `v150-self-time-materials` → **`v151-proactive-settle`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："自主层有关'没人接'的判定是不是有bug？明明有人回复，还是判定没人接。"
+
+**是 bug，而且线上账本里能数出来：3 条"没人接"里有 2 条其实有人回了她。** 根因是结算读错了地方——`settle()` 拿 `row.conversation` 去查"这之后有没有人说话"，而脊柱模式写的那一行是 `conversation='self:account'`（"她自己时间这一轮醒过"），那个会话里**永远没有任何事件**。于是每一条 `sent` 的脊柱行都必然判成 `quiet`。
+
+线上证据（`data/qq-bridge.sqlite3`，只读查的）：
+
+- 行 3（11:14:40，`self:account`）判 quiet —— 11:15:18 群里 `@3667925015 你还记得我吗`，`mentions` 里就是她；
+- 行 10（11:47:23）判 quiet —— 她 11:47:18 在 `group:1033440455` 说过话，12:01:54 有人 `@3667925015 喊出我的名字吧！`；
+- 行 9（11:35:45，私聊）判 quiet —— 这条是真没人回，判对了；
+- `events` 表里 `self:account` 一共 **0 条**，而 `group:946719566`、`group:1033440455` 各有几百条。
+
+改动：
+
+- `proactive.mjs#settle`：只有 `group:` / `user:` / `bili:` 这种**真实窗口**才谈得上"有没有人接"，其余记 `outcome='self'`（不算账、不进回应率）。真正的账记在 `#spineTick` 按目标补的 `kind='say'` 行上，那些行本来就是按窗口记的。
+- `proactive.mjs#settle`：改成按时间读（`store.eventsSince`，从她开口那一刻往后取）而不是"最后 40 条"。结算常发生在开口 30~60 分钟后，群里热闹时"最后 40 条"未必覆盖得住那 15 分钟。
+- **`engagementOf` 收紧成"接她那句"**（用户点名要的）：原来只要她开口之后这个窗口里有别人说话就算"有人接"，测的其实是群热不热闹。现在三条靶子，按顺序判——① 有人 @ 了她（`payload.mentions` 命中她的 QQ）；② 有人引用了她说的那一句（`payload.replyToId` 命中她自己消息的 ID）；③ **接着她说**：她开口之后第一句别人说的话，且没有把话头递给别人（没 @ 第三个人、也没引用第三个人的话）。观察范围是 `proactiveEngageWindowMs`（默认 15 分钟），15 分钟之后群里说什么都与这一句无关；系统事件（没有发送者）不算人说话。
+- `store.recordProactive` 支持 `createdAt`；`#spineTick` 补的 `say` 行改用**她真正开口的时刻**（`selfMessagesSince` 的 `MIN(created_at)`），不是回合结束补记的时刻——否则中间那一分钟里别人的回应会被切到 `since` 之前。结算读事件时也往前多看 60 秒，才认得"她那一句"被谁引用了。
+- `store.migrate`：一次性、幂等地把历史上被误判的 `self:account + quiet` 改成 `self`（不改的话面板今天的"没人接 3"仍然是错的）。
+- `proactiveSnapshot().today` 新增 `selfTime`；面板今日账多一枚「不算账」chip，最近账本里 `self` 行显示"不算账"而不是一个裸 `self`。
+
+验证：`proactive` 25→**29**（新增：`self:account` 行不再判"没人接"且不计入 `today.quiet`、计入 `selfTime`；`say` 行按真实开口时刻记账时，开口后 3 秒的回应能算成 `replied`；三条靶子的单元判定（@她／引用她／接着她说 vs 别人互 @ 互引 / 系统事件 / 窗口外）；结算层面"群里别人互聊 → 没人接、@ 她或引用她 → 有人接"），`store 36`、`panel 12`、`world-snapshot 8`、`windows 16`；`--fast` **1110 项通过**（`lifecycle`/`workspace` 是既有环境问题）。同时拿线上那三行真实数据回放了新判据：行 3、行 10 → 有人接（都是 @ 她），行 9 → 没人接。为什么该升："她记不记得有人接她话"这件事的账，从错的变成对的，而且第一次真的对着"她那一句"。
+
+2026-11-01 版本号 `v149-decision-trace` → **`v150-self-time-materials`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："可以，修复一下吧"（承接心跳那一轮结尾列出的第 1 条）。
+
+**她"自己的时间"里那份工具清单和世界快照，一次都没进过提示词。** `proactive.mjs` 一直在给 `executeTurn` 传 `taskText`（脊柱回合是 `spineTaskText(快照)`：世界快照 + "你手里真能做的事"那份具体工具菜单；自主回合是 `#selfTask()`），但 `executeTurn` 的参数解构里**根本没有这个键**，下面又用自己算的 `taskText` 覆盖掉传进来的值——两份文本静默丢弃。线上的样子是：`render.mjs` 的脊柱规则写着"手里有工具做的事写在【相关任务材料】里"，而【相关任务材料】整段不存在；她只知道"你可以做任何你想做的事情"，不知道手里有 `qq_windows` / `bili_search` / `qq_intent`，也不知道哪个窗口刚在聊什么。`spine-task.test.mjs` 一直在验那份文本本身对不对（提到的工具名是否都在白名单里），没人验它到底有没有被送进去——这是"文本对了、管道断了"的典型。
+
+- `lib/application/execute-turn.mjs`：接住调用方预置的 `taskText` 并排在最前（任务账本补在后面），同时进 `stats.lastPrompt.taskContextChars` 与 `workspaceNeeded`。
+- `lib/prompt/render.mjs`：【相关任务材料】在脊柱回合换成"这一轮是你自己的时间：下面是此刻的世界和你能做的事"；群聊/任务回合仍是原来那句。
+- `lib/prompt/render.mjs`：顺带修同一毛病的另一处——脊柱回合的「现在」段原本也是 `════ 现在这条消息（要回应的是这一条）════` + `发送者 / 消息 ID`，可那一轮唯一的"消息"是时钟替她写的一行字。现在换成 `════ 你自己的时间（这不是谁发来的消息，也不是一条新消息）════` + 位置 / 现在 / 点名 / 正文；单条心跳的 `点名` 也改回"这一轮是你主动想插一句"，不再借用清醒窗口的说法。
+
+验证：`self-time-prompt` 6→**8**（新增：预置的任务材料真的进得了提示词；她自己的时间里没有"要回应的是这一条"、没有"发送者"、那行字只出现一次），`heartbeat 27`、`bug-regressions 55`、`history-context 6`、`proactive 25`、`spine-task 6`、`windows 16`、`self 11`、`tool-scope 6`；`--fast` **1104 项通过**（`lifecycle` 的 `linked.some`、`workspace` 的 `tar: Cannot connect to C:` 仍是既有环境问题）。
+⚠️ 同一棵工作树上还有另一个会话的 `v146/v147/v149`（面板自主层、系统通知、判断流闭环）；build 以最后一次升号为准，我这里落在 `v150-self-time-materials`。
+
+2026-11-01 面板三件观测补齐（`v149-decision-trace`）。用户原话："继续做这三件事"。
+
+**一、判断流终于能回答"判了接，然后呢"。** 之前判断流只记到裁决，往下就断了：
+判了接 → 结尾 `[SKIP]`、楼层复核撤了、投递策略挡了、队列失败，这四种在"她没说话"这件事上一模一样。
+
+- `lib/agent/turn-trace.mjs`：回合结果账（内存环形 120 条）。`finishReply` 的每个出口都落一条
+  （`queued` / `agent-silent` / `floor:xxx` / `spine:no-target` …），真投递那条还记气泡数与字数。
+- `turnId` 从"回合尾部才算"提前到候选/注意力判断之前，并顺着 `evaluateAttention` → `decideReply`
+  → `recordAuxCall` 一路传下去；`auxDecisions()` 按 `turnId` 把结果并进每一行。
+- 面板判断流每行多一行 `→ 发了 2 个气泡 / 268 字` 或 `→ 她自己决定不说`。
+
+**二、消息准入账。** `事件分类` 只有累计数，回答不了"她怎么没理我"，而答案大多在更上游：
+没 @ 她就先攒着、纯表情只当上下文、重复上报、托管关着、不是她该理的。
+
+- `lib/agent/ingress-log.mjs`：每条消息在**下结论的那一刻**记一笔（只留 80 字摘要，环形 140 条）。
+- `routes/onebot.mjs` 的每道闸（debug / disabled / 白名单 / 去重 / 被动 / 缓冲 / 心跳 / 合并 / 回合成/ bili）都接上了。
+- `/status` 新增 `准入`；面板新增「消息准入」卡：按闸门计数 + 最近 12 条（谁、哪个会话、说了什么、被哪道闸挡的）。
+
+**三、「现在醒一次」。** `tick({ force: true })` 一直存在但没有对外入口，调这一层时最需要它。
+
+- `admin/actions.mjs` 新增 `proactive.tick`（不危险、无参数、走审计与幂等）；主动层关着/缺依赖时**明确拒绝**，不假装成功。
+- 面板「自主层」卡头加了按钮，点了先确认（会花一次模型调用）。
+
+验证：新增 `trace` 套件 **7 项**（结果账按 turnId 取回与封顶、判断流 join、准入账分类与摘要截断、动作的三道拒绝 + force + 幂等重放）；
+`attention` 28、`panel` 12、`proactive` 25、`deliver` 14、`heartbeat` 27 均无回归；`--fast` **1102 项通过**（`lifecycle`/`workspace` 仍是既有环境问题）。
+⚠️ 这一批与另一个会话的 `v146/v147`（面板自主层、系统通知、心跳批次）在同一棵工作树上，build 号以最后一次升号为准。
+
+2026-11-01 版本号 `v147-system-notices` → **`v148-heartbeat-batch`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："心跳接话应该注入完整上下文，让agent跟上话题或做出评价，而不是单纯的接话最新一条。"
+
+**心跳那一轮不再被写成"回应这一条"。** 心跳一直是拿这一批的**最后一条**合成一个 event 交给 `executeTurn`，于是提示词最末、离生成位置最近的那一段仍是 `════ 现在这条消息（要回应的是这一条）════`，里面只有最后一个人说的那句话；前面五条虽然在「聊天记录」里，但和几小时前的旧消息长得一模一样。结果是心跳接的永远是最后一句——对一个已经聊了六条的显卡/闪退话题，她只会点评"电源不够"那一句。
+
+- `lib/application/heartbeat.mjs`：把整批 `batchEvents` 作为 `heartbeatBatch` 一起交给这一轮（`event` 仍是最后一条——投递目标、楼层归属需要一条具体的消息）。
+- `lib/application/execute-turn.mjs`：`heartbeatBatch` 里的消息 ID 一并计入 `inputIds`，整批从滑动窗口里摘出去，交给「现在」段渲染一次——既不丢上下文，也不会同一批在提示词里出现两遍（去重由 `recordContext` 按 messageId 兜住，这里做的是显式排除）。
+- `lib/prompt/render.mjs`：心跳且整批 >1 条时，「现在」段改成 `════ 他们刚聊到的这一批（没有人问你，你自己决定要不要接一句）════` + `这批：共 N 条｜消息 x–y｜最后一句由谁说的` + 逐条时间线；不再有「发送者/消息 ID/正文」这套"有人在对你说话"的字段。单条心跳（面板催一次、冷却到期只有 1 条未读）仍走原来的单条版式，只把点名的口径从"清醒期接话"改成"你主动插话的一轮"——清醒窗口是另一套机制，混着写会让她以为有人在等她回。
+- `lib/prompt/render.mjs` 的每轮规则同步收紧：接的是这一整段话题，不是最后那一句；可以评价、补充、举反例、只挑中间某句回，但不许逐句作答、也不许只给最后一个发言人一个点评。
+
+验证：`heartbeat` 25→**27** 项（新增：整批在「现在」段里各出现一次且不再出现在聊天记录里、更早那批仍作为历史存在；单条未读的心跳仍按单条渲染且不伪造一批），`bug-regressions 55`、`history-context 6`、`self-time-prompt 6`、`logic 197`；`--fast` = **1102 项通过**，2 个测试文件在本机失败（`lifecycle` 的 `linked.some` 是 Node 22.22 把 `internal/modules/esm/loader` 的 `linked` 换成别的形状，`workspace` 的 `tar: Cannot connect to C:` 是 Windows 上的 tar 路径问题，两者都与这批改动无关）。为什么该升：心跳那一轮注入的东西和由此决定"接什么"，线上行为变了。
+
+2026-11-01 版本号 `v146-panel-autonomy` → **`v147-system-notices`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："这个agent目前读不到被禁言、获得头衔等QQ的json信息，怎么处理？"
+
+**她第一次能看见 QQ 的系统事件。** 起因很具体：群里"蚝油叉烧包"发了一句纯文字"你被禁言了"，她只能靠猜着回"？我还能说话诶"——而真实的系统灰条"你被群主禁言10分钟"（OneBot `notice: group_ban`）在 `routes/onebot.mjs` 的 notice 分支里被最后一个 `else return;` 直接丢弃了：除了撤回、戳一戳、表情回应，其余 notice 全都进不了她的上下文。
+
+改了什么：
+
+- **`lib/application/system-notices.mjs`（新）**：把 notice 事件渲染成一句系统文案——`group_ban`（禁言/解禁，时长秒转分钟）、`group_increase`/`group_decrease`（进退群/踢人）、`group_admin`（管理员变动）、`honor`（龙王/群聊之火/快乐源泉）、`essence`（精华消息）、红包运气王。`user_id` 是自己时报"你"，否则报 QQ 号（notice 里只有号码，不值得为一条背景信息再打一次 API 查昵称）。不认识的返回 null，静默跳过。
+- **`lib/routes/onebot.mjs`**：notice 分支的 `else return;` 换成 `handleSystemNotice(...)`——白名单内的会话把文案作为「系统」条目写进滑动窗口（`who: '系统'`、`qq: ''`，不污染 recentQqs），然后照旧 `return`。
+- **设计取舍：只进上下文，不触发回合。** 被禁言时本来就发不出话；头衔这类事件也不值得打断别人聊天。它们在下一轮被接纳的消息里作为背景可见——正好用来核实"你被禁言了"这类玩笑是不是真的。同样刻意不做：不刷新唤醒窗口、不进记忆抽取（禁言十分钟不是长期事实）。以后她说话被系统拦时（禁言期间发消息失败），send 队列的报错日志能和窗口里的系统条目对上了。
+- **`lib/config.mjs`**：新增 `systemNoticesEnabled`（默认 `true`，显式设 `false` 可整体关闭）。
+
+验证：`system-notices` 8 项（新；渲染 5 + 端到端 3：group_ban 不触发回合且下一条消息的提示词含「系统：你被禁言 10 分钟」、白名单外不记、开关关闭不记）；全量 1118 项通过、3 个文件失败（`mcp`/`lifecycle`/`workspace`，均为环境问题：node:sqlite 实验版 API 差异、Windows tar 路径，v146 已知）。顺手修了 `poke-wake` 的存量故障：它的假 ctx 一直没实现 `ctx.on`，而 `createHandler` 自 v97 起就订阅 `qq-bridge:external-message` —— 整套 16 项全炸在注册阶段，因为 `--fast` 跳过它而长期没暴露；补上 `on`/`emit` 后 16/16。`PROMPT_REVISION` 不动：没碰提示词措辞，测试断的是窗口内容不是文案。
+
+2026-11-01 版本号 `v145-learned-silence` → **`v146-panel-autonomy`**（`lib/bootstrap.mjs` 的 `stats.build`）。用户原话："更新到v145了，你看看怎么继续优化"。
+
+**面板第一次能看见"她自己的时间"在干什么。** 起因很具体：`grep -c proactive lib/panel/app.js` 在 v145 上是 **0** —— 自主层从 v121 上线到 v145 换了整套模型（自主时间 + 按目标学），面板一个字都没跟。
+
+改了什么：
+
+- **`/status` 的 `tasks.proactive` 换成 `proactiveSnapshot()` 展开**。这个函数在 v145 里已经写好了（注释还写着"状态页要的那一份"），但 `status.mjs` 从来没人调它 —— 对外还是 v122 那六个平铺计数。现在钟、今天的账、按目标学习、最近账本、最近一次决定全在里面，旧的 `spoken/ticks/declined/failures/nextAt` 保留（排查脚本还在用）。
+- **修两处"读数说谎"**（这两条是这次真正的 bug）：
+  1. `learn` 原先拿**今天的行**算 `frequencyFactor` —— 今天只发过一次就样本 <2，factor 恒为 1，面板永远显示 ×1，看起来她什么都没学到；而且把 `self:account`（她自己的时间账）当成了"目标"。改成按目标、按 90 天历史（与 `learningFor()` 同一口径），并排除她自己。
+  2. `today.budget` 原先直接吐 `dailyAllowance()`，`Infinity` 过一遍 JSON 变成 `null` —— "不限次数"和"没这个字段"分不开。现在显式用 `null` 表示不限。
+- **面板新增「自主层」卡**：模式徽章（自主时间／借一个房间／旧菜单）、钟（30~60 分钟随机 + 睡觉时段 + 下次醒来倒计时 + 醒过／开口／没开口／失败）、今天的账（发了／有人接／没人接／待回查 + 今日额度）、按目标学习（接 x/y · ×权重）、最近账本。还会显示她这一轮**写了却没发出去**的草稿，以及"做了：翻了 2 个窗口" —— 这是回答"她为什么没动"最直接的两行证据。
+- **口径跟人设对齐**：`factor: 0` 在 v145 不是封门，只是把那个目标抽到的权重降到 0.05，所以卡片写"记得没人接 · ×0.05"，不写"停手／拉黑"。
+- **`tools/preview-panel.mjs` 的主动层数据改由真实 `proactiveSnapshot()` 生成**（假 store + 真函数）。手写假数据正是这次漂移的根源：v145 换了形状，预览还按旧形状画，看着正常、线上却是另一回事。
+
+验证：`proactive` 23→**25** 项（新增：学习读数按 90 天按目标算且不把自己当目标、额度 0 → null 且过 JSON 仍为 null）、`panel` 12 项；`--fast` 见下。`PROMPT_REVISION` 不动：这一批没碰提示词。
+
 2026-11-01 版本号 `v144-unlimited` → **`v145-learned-silence`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
 **把"她会学习"接到三个真地方：记账、看见、收嘴。** 之前 `frequencyFactor()` 早就算好了四档，但 `proactive` 行记的是"她自己时间那一轮"（`conversation='self:account'`），不是"她对某个群说了一句"——所以 `proactiveHistory('group:x')` 永远是空的，学习没有落点；而且 0 也被 `Math.max(0.05, factor)` 兜成了 0.05，再加上她现在能对任意窗口 `say`，权重根本管不住嘴。
@@ -174,8 +514,6 @@
 
 2026-11-01 版本号 `v128-mood-merge` → **`v129-spine`**（`lib/bootstrap.mjs` 的 `stats.build`）。
 
-
-
 这一版动的是**决策点**，不是心情，也不是工具。之前她的"自己的时间"是在某个房间的会话里跑回合——她看得见那个群最近的消息，决定就被那个群带着走；"主动"缩成了"在某间屋子里发作"。更早一版把"在哪醒"改成随机挑窗口，那只是把病因挪了个位置：多脑的病，是一个决定仍然长在某间屋子里。
 
 - **醒在脊柱**：新增会话 `self:account`（`lib/application/proactive.mjs` 的 `#spineTick`），它不属于任何群、任何私聊。到点后她在那里醒来，看见的是 `buildWorldSnapshot()` 压出来的世界：各窗口最近的动静（安静多久、她最后一次说话是什么时候）、她最近自己做过的事、此刻的心情、她写下过的想法。房间里最近的消息**不再**喂进这个决定。
@@ -189,7 +527,6 @@
 为什么该升：`/status` 的 `memory.proactive.mode` 会从 `turn` 变成 `spine`，它决定"决定发生在哪儿"，这是这一批里唯一会改变线上行为的东西。
 
 2026-11-01 版本号 `v127-single-author` → **`v128-mood-merge`**（`lib/bootstrap.mjs` 的 `stats.build`）。
-
 
 用户戳破的一个漏洞：天气是**全局**的，但写它的日结一次只看得见**一间屋子**，同一天几个群"后写的覆盖前面的"——那等于谁最后写，她就带着谁的心情过夜；另一边刚被夸、这边刚被冷落的差异被整段丢掉。这不是"覆盖丢信息"的问题（人本来也只能带一种心情），是**署名者的视野太窄**。
 
@@ -271,6 +608,7 @@
   > 没有任务清单，也没有人要求你产出什么。要不要开口、开在哪、说什么，你自己定。
 
   工具本来就在 QQ 回合的白名单里（`BILI_READ_TOOLS` + `qq_windows` + 发送工具），伸手就能用；她说的话走**正常的回合投递**，不需要宿主再写一条 `deliver`。
+
 - **宿主只剩三件事**：钟（约一小时 ±40%，`jitteredDelay`）、账（`proactive` 表：谁、何时、说没说、有没有人接）、**世界的物理**——睡觉时段（`proactiveSleepFrom/To`，默认 01:00–08:00 不醒）、每天总次数（`proactiveDailyMax`）、正在进行的对话不打断（窗口有未读或在清醒期就换一个窗口）。
 - **记性不再是闸门**：`frequencyFactor` 从"筛掉窗口"改成"降低她醒在这个窗口的概率"（最低权重 0.05，不是 0）。她记得这地方没人接，但记忆不该替她把门锁上。
 - 真回合里那条"没有新消息"是**场景标记**（`__selfTurn`），不是谁说的话：`admitMessage` 见到这个标记直接放行（否则会被 `selfIds` 拦截当成"她自己发的"），回合结束后把它从窗口历史里摘掉，不冒充聊天记录。
@@ -349,12 +687,12 @@
 
 根因有两层，用四组真实请求对 `chi-yu-ai.com/v1/chat/completions`（`deepseek-v4.1-flash`）测出来：
 
-| 请求 | 耗时 | 返回里的思考 | 结论 |
-|---|---|---|---|
-| 什么档位都不传 | 2607ms | 65 字 / 20 tokens | 供应商默认：**开思考** |
-| `reasoning_effort: "none"` | 2292ms | 0 | 真正关掉 |
-| `reasoning_effort: "off"` | 1289ms | 88 字 / 24 tokens | 未知值被**静默忽略** |
-| `thinking:{"type":"disabled"}` | 2365ms | 0 | 也能关 |
+| 请求                           | 耗时   | 返回里的思考      | 结论                   |
+| ------------------------------ | ------ | ----------------- | ---------------------- |
+| 什么档位都不传                 | 2607ms | 65 字 / 20 tokens | 供应商默认：**开思考** |
+| `reasoning_effort: "none"`     | 2292ms | 0                 | 真正关掉               |
+| `reasoning_effort: "off"`      | 1289ms | 88 字 / 24 tokens | 未知值被**静默忽略**   |
+| `thinking:{"type":"disabled"}` | 2365ms | 0                 | 也能关                 |
 
 - 第一层：profile 里 chiyvapi 的映射写的是 `off: null`——「选 off 就不发字段」。不发字段 = 供应商默认 = 开思考。这正是她一直在想的原因。
 - 第二层：`runtime_state` 里活跃会话的签名是 `chiyvapi / deepseek-v4.1-flash / 空档位`，说明运行中的进程拿到的 `llmReasoningEffort` 是空串，`planEffort()` 连档位都不发，同样落回默认。
@@ -618,7 +956,6 @@ v108 为什么改 examples：用户的判断是"回复示例太冷静、太合�
 
 验证：`node tools/run-tests.mjs recovery-guard reply-recovery send-queue deliver` 在系统临时副本中 **45 项通过、0 个测试文件失败**（`recovery-guard` 9 项，新增"探针说库好了就接着跑""探针仍失败就继续暂停"两条）。在线 HMR 重载后：`回复恢复={paused:false,resumed:0}`、`lastError` 空；11:04–11:10 已备好却发不出去的 6 条回复在 11:13:57–11:14:41 一次性发完（同一时段 20 条 outbox 全 SUCCEEDED），群内对话恢复。未发送合成 QQ 消息。
 
-
 2026-10-27 修「答到一半被新消息打断，已写出的正文被当旧草稿复写掉」：用户贴 21:13 那轮截图——先答「……不敢了不敢了／再漏，我就把草稿自己咽下去」，中途来了新消息被注入，最后群里只剩注话后的「概率这东西，只要漏过一次，就成 100% 了」，被问的那句没答。根因是两种注入共用 `qq-interject:<uuid>`，`lib/agent/runner.mjs` 见到就无条件 `discardIntermediate()`；可 `inTurnInjectionMode: all` 的注入指令自己写着「最终答复仍以原请求为准」，属于追加信息而非改需求。① `lib/application/interjections.mjs` 的 `rpcId` 带上模式段 `qq-interject:<all|amend>:<uuid>`；② `lib/agent/runner.mjs` 只有 `amend` 才作废旧草稿，`all` 保留已写出的正文（旧格式无模式段按 `amend` 处理）。验证：`turn-attribution` 32/32、`--fast` 871 项通过。
 
 2026-10-22 每轮提示词版式重整（`v98-prompt-sections`）：用户贴出一轮真实注入后指出"每轮注入的 prompt 太乱了，根本不能好好看清谁在说什么"。旧版把二十多个 `【…】` 平铺成一条流：静态设定、本轮规则、记忆、任务、聊天历史、当前消息全是同一级标题，历史记录又是 `[消息 id，时间 t，谁（qq），引用 x] 内容` 这种元数据在前、人名埋在方括号里的写法；当前消息的正文只是一行裸文本，前后还夹着执行归属的整段 JSON 和单行图片目录 JSON。模型只能靠上下文猜边界，实际症状就是把历史里的发言人当成当前说话人、把上一轮的规则当成本轮授权。
@@ -801,11 +1138,11 @@ v71 验证：系统临时副本全量 **842 项通过，0 个测试文件失败*
 
 **2026-10-16 更正与修复（`auxProvider`/`auxModel`）**：上面那句"该上限低于首字时间"方向对了，但当时把它归因成"中转慢"并不完整。直连实测同形状请求（max_tokens 280、流式）：
 
-| 请求 | 首字节 | 正文 | finish |
-|---|---|---|---|
-| `deepseek-v4.1-flash` 默认 | **5331ms** | **0 字**（思考 1157 字吃满预算） | `length` |
-| `deepseek-v4.1-flash` + 关闭思考（三种拼写均可） | 1822–2497ms | 111–121 字 ✅ | `stop` |
-| **`deepseek-v4-flash`**（同路由，默认不思考） | **2125ms** | 117 字 ✅ | `stop` |
+| 请求                                             | 首字节      | 正文                             | finish   |
+| ------------------------------------------------ | ----------- | -------------------------------- | -------- |
+| `deepseek-v4.1-flash` 默认                       | **5331ms**  | **0 字**（思考 1157 字吃满预算） | `length` |
+| `deepseek-v4.1-flash` + 关闭思考（三种拼写均可） | 1822–2497ms | 111–121 字 ✅                    | `stop`   |
+| **`deepseek-v4-flash`**（同路由，默认不思考）    | **2125ms**  | 117 字 ✅                        | `stop`   |
 
 即：主模型**默认开启思考**，思考分片走 `reasoning_content`，在 `maxTokens` 很小时把预算全花在思考上 —— 既会撞 `taskRouteTimeoutMs`，又产出截断 JSON（线上 24 次 timeout + 6 次 invalid-json 的共同机制）。**修法是给辅助判断调用单独指定一个不思考的快模型**，这也正是本文件里"便宜模型判断该不该插话"的本意（此前没有配置键，所以它一直在用主模型）。优先级：专用键（`heartbeat*`/`memory*`）> `auxProvider`/`auxModel` > `llmProvider`/`llmModel` > 全局默认；`status.models` 直接列出各路实际解析结果。
 
@@ -853,7 +1190,7 @@ v69 临时副本全量 **838 项通过**，其中 task-routing／delegated-work�
 
 桌面端启动恢复（`v55-heartbeat-startup-recovery`）：有未读背景消息且输入批次正在恢复、排队或 WAIT 时，心跳通过定时器等待输入释放，不立即递归重排。修复了后台持续占用 CPU、本地 HTTP 无响应、桌面 GUI 等待启动握手约 5 分钟后报 `UND_ERR_HEADERS_TIMEOUT` 的问题；未读消息和原输入继续保留。
 
-和 [`qq-mcp`](<qq-mcp/README.md>) 的分工：`qq-mcp` 只能「发」（Agent 主动说话）；本插件补上「收」，形成双向对话。
+和 [`qq-mcp`](qq-mcp/README.md) 的分工：`qq-mcp` 只能「发」（Agent 主动说话）；本插件补上「收」，形成双向对话。
 
 回复可靠交接（`v43-durable-reply-handoff`，正文边界于 `v49-final-text-boundary` 修正）：提交模型前将 QQ 来源、Session、requestId 和订阅基线写入共享 SQLite 的 `bridge_replies`；取得回合结果后先存正文，再保存实际气泡/表情投递计划。重载、订阅断流或进程退出后，每 5 秒扫描未完成记录，按原 requestId/inbox/turn 回读 DSH 历史，不重新提交模型；保存的旧 Session 即使已经轮换也可以恢复。只投递本回合最后一次工具调用后的最终正文，保留其中全部文本片段；工具前/带工具调用的过程文字和思考不转发，已成功工具进度仍按完整气泡去重。
 
@@ -913,26 +1250,26 @@ D:\Code\dsh-qq-bridge\
 
 另外 `tools\` 下是一堆**诊断脚本**，排查时很有用：
 
-| 脚本 | 用途 |
-|---|---|
-| `check-buffer-health.mjs` | 看缓冲/ack 健康度 —— 排查"上下文不是最新" |
-| `clear-stale-gaps.mjs` | 清掉库里夸大的假缺口 |
-| `probe-bridge.mjs` | 往桥接端口发合成事件，验证入站链路 |
-| `inspect-store.mjs` | 看库里各表、最近事件、待审批动作 |
-| `probe-routes.mjs` | 只读诊断语义路由的失败分布与时序（可 `--hours/--since/--json`）；**先把库复制到临时目录再读，不碰线上库** |
-| `audit-task-window.mjs` | 只读事故时序：入站、rpcId、journal 与发送回执；采用北京时间，不输出正文 |
-| `check-ingress-latency.mjs` | 只读诊断"进 DSH 之前等了多久"：按路由结局拆开合并窗口与路由超时，并列出路由失败原因分布 |
-| `check-input-aggregation.mjs` | 只读诊断输入聚合：真正聚合过的回合占比、窗口内命中率、以及"连环提问簇"本可少发几次回复 |
-| `check-overlap-gain.mjs` | 只读诊断输入重叠的影子读数："生成与窗口并行"能省多少（savedMs）、会不会要扣着不发（heldMs）、生成期间又来了几条（late） |
-| `check-turn-latency.mjs` | 只读诊断每个回合的**首字延迟**（turn/start → 第一条正文）与总时长，用来区分"等模型开口"和"写得慢" |
-| `check-recovery-health.mjs` | 只读诊断投递恢复通道：未了结行的年龄分层、阻塞性执行、迟到投递护栏是否在工作 |
-| `check-reply-guard.mjs` | 只读核对参与决策的硬护栏覆盖率，并列出"会去问决策模型"的真实消息供人工确认 |
-| `list-our-tools.mjs` | 从源码抽出 qq-mcp 的完整工具表 |
-| `dump-config-defaults.mjs` | 打印 Config schema 的真实默认值（写文档时核对用）|
-| `measure-preset.mjs` / `compare-sessions.mjs` | 量预设/token 开销 |
-| `window-optimizer.mjs` | 算"窗口开多少轮最划算" |
-| `debug-kick-approval.mjs` | 手工复现踢人审批流程 |
-| `restore-profile.mjs` | profile 被写坏时从备份恢复 |
+| 脚本                                          | 用途                                                                                                                    |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `check-buffer-health.mjs`                     | 看缓冲/ack 健康度 —— 排查"上下文不是最新"                                                                               |
+| `clear-stale-gaps.mjs`                        | 清掉库里夸大的假缺口                                                                                                    |
+| `probe-bridge.mjs`                            | 往桥接端口发合成事件，验证入站链路                                                                                      |
+| `inspect-store.mjs`                           | 看库里各表、最近事件、待审批动作                                                                                        |
+| `probe-routes.mjs`                            | 只读诊断语义路由的失败分布与时序（可 `--hours/--since/--json`）；**先把库复制到临时目录再读，不碰线上库**               |
+| `audit-task-window.mjs`                       | 只读事故时序：入站、rpcId、journal 与发送回执；采用北京时间，不输出正文                                                 |
+| `check-ingress-latency.mjs`                   | 只读诊断"进 DSH 之前等了多久"：按路由结局拆开合并窗口与路由超时，并列出路由失败原因分布                                 |
+| `check-input-aggregation.mjs`                 | 只读诊断输入聚合：真正聚合过的回合占比、窗口内命中率、以及"连环提问簇"本可少发几次回复                                  |
+| `check-overlap-gain.mjs`                      | 只读诊断输入重叠的影子读数："生成与窗口并行"能省多少（savedMs）、会不会要扣着不发（heldMs）、生成期间又来了几条（late） |
+| `check-turn-latency.mjs`                      | 只读诊断每个回合的**首字延迟**（turn/start → 第一条正文）与总时长，用来区分"等模型开口"和"写得慢"                       |
+| `check-recovery-health.mjs`                   | 只读诊断投递恢复通道：未了结行的年龄分层、阻塞性执行、迟到投递护栏是否在工作                                            |
+| `check-reply-guard.mjs`                       | 只读核对参与决策的硬护栏覆盖率，并列出"会去问决策模型"的真实消息供人工确认                                              |
+| `list-our-tools.mjs`                          | 从源码抽出 qq-mcp 的完整工具表                                                                                          |
+| `dump-config-defaults.mjs`                    | 打印 Config schema 的真实默认值（写文档时核对用）                                                                       |
+| `measure-preset.mjs` / `compare-sessions.mjs` | 量预设/token 开销                                                                                                       |
+| `window-optimizer.mjs`                        | 算"窗口开多少轮最划算"                                                                                                  |
+| `debug-kick-approval.mjs`                     | 手工复现踢人审批流程                                                                                                    |
+| `restore-profile.mjs`                         | profile 被写坏时从备份恢复                                                                                              |
 
 ## 数据流
 
@@ -981,18 +1318,18 @@ POST http://127.0.0.1:19387/qq/onebot          ← 本插件用 webServer.regist
 
 ### 1. 当群友聊天
 
-| 能力 | 说明 |
-|---|---|
-| 被 @ 可直接回复 | `groupTrigger: at`，主要点名她时进入完整回合；模型仍可在无需接话时沉默 |
-| 叫名字也算 | `nameTriggers: ['deepseek', '大肥鱼']`，不必真的去点 @（大小写不敏感） |
-| 接着聊 | 每条成功发送的文字或表情都会开启/刷新 `awakeMs`（60s）窗口，群里没 @ 的后续消息也能接着聊 |
-| 主动插话 | 心跳机制，见下 |
-| 说短话 | 默认一句话 1~10 字，真人打字节奏 |
-| 傲娇语气 | 像会哈气的小猫：短促、带一点刺地接梗；玩笑针对当下的事，遇到认真或被冒犯时收住 |
-| 分几条发 | 当前 desktop profile 的 `replyShapes: []` 关闭抽卡，由模型自行决定，**不封顶**（`maxBubbles` 已废弃）；正文里每个气泡用一对 `『』` 框起来，只有框内的字会进群，框外的排稿说明不会发出去；气泡之间按字数模拟“正在打字” |
-| 发表情 | 当前关闭抽卡，由模型选择是否输出 `[表情:编号]`，桥接把它转换为收藏表情发送；标记一律摘干净，绝不作为正文发出去 |
-| @ 别人 | 她自己在正文里写 `[@:QQ号]`（人数上限见 `atMentionMax`），桥接把它变成真的 at 段发出去；**不写就不带**，私聊不 @，`@全体成员` 一律拒绝 |
-| 该沉默就沉默 | 判断不需要接话时只输出 `[SKIP]`，桥接什么都不发 |
+| 能力            | 说明                                                                                                                                                                                                                  |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 被 @ 可直接回复 | `groupTrigger: at`，主要点名她时进入完整回合；模型仍可在无需接话时沉默                                                                                                                                                |
+| 叫名字也算      | `nameTriggers: ['deepseek', '大肥鱼']`，不必真的去点 @（大小写不敏感）                                                                                                                                                |
+| 接着聊          | 每条成功发送的文字或表情都会开启/刷新 `awakeMs`（60s）窗口，群里没 @ 的后续消息也能接着聊                                                                                                                             |
+| 主动插话        | 心跳机制，见下                                                                                                                                                                                                        |
+| 说短话          | 默认一句话 1~10 字，真人打字节奏                                                                                                                                                                                      |
+| 傲娇语气        | 像会哈气的小猫：短促、带一点刺地接梗；玩笑针对当下的事，遇到认真或被冒犯时收住                                                                                                                                        |
+| 分几条发        | 当前 desktop profile 的 `replyShapes: []` 关闭抽卡，由模型自行决定，**不封顶**（`maxBubbles` 已废弃）；正文里每个气泡用一对 `『』` 框起来，只有框内的字会进群，框外的排稿说明不会发出去；气泡之间按字数模拟“正在打字” |
+| 发表情          | 当前关闭抽卡，由模型选择是否输出 `[表情:编号]`，桥接把它转换为收藏表情发送；标记一律摘干净，绝不作为正文发出去                                                                                                        |
+| @ 别人          | 她自己在正文里写 `[@:QQ号]`（人数上限见 `atMentionMax`），桥接把它变成真的 at 段发出去；**不写就不带**，私聊不 @，`@全体成员` 一律拒绝                                                                                |
+| 该沉默就沉默    | 判断不需要接话时只输出 `[SKIP]`，桥接什么都不发                                                                                                                                                                       |
 
 #### 她怎么 @ 人（`atMentionEnabled`）
 
@@ -1075,15 +1412,15 @@ POST http://127.0.0.1:19387/qq/onebot          ← 本插件用 webServer.regist
 `tools/check-turn-latency.mjs <Session 目录>` 从真实会话日志里算
 `turn/start → 第一条 assistant 正文` 的间隔。用它量 group 1033440455 的 7 个真实回合：
 
-| 回合 | 首字 | 正文 | 工具调用 | 步数 |
-|---|---|---|---|---|
-| 1 | 7.37s | 41 字 | 0 | 1 |
-| 2 | 8.76s | 36 字 | 0 | 1 |
-| 4 | 13.24s | 51 字 | 0 | 1 |
-| 5 | 4.49s | 35 字 | 0 | 1 |
-| 6 | 8.86s | 27 字 | 0 | 1 |
-| 7 | 11.96s | 28 字 | 0 | 1 |
-| 8 | 5.98s | 28 字 | 0 | 1 |
+| 回合 | 首字   | 正文  | 工具调用 | 步数 |
+| ---- | ------ | ----- | -------- | ---- |
+| 1    | 7.37s  | 41 字 | 0        | 1    |
+| 2    | 8.76s  | 36 字 | 0        | 1    |
+| 4    | 13.24s | 51 字 | 0        | 1    |
+| 5    | 4.49s  | 35 字 | 0        | 1    |
+| 6    | 8.86s  | 27 字 | 0        | 1    |
+| 7    | 11.96s | 28 字 | 0        | 1    |
+| 8    | 5.98s  | 28 字 | 0        | 1    |
 
 首字 **p50 = 8.76s**，正文都只有几十字，工具 0 次、步数 1。也就是：时间几乎全花在
 **等主模型开口**（当时 a6api / deepseek-v4.1-flash），不是桥接、窗口、工具或生成。
@@ -1158,12 +1495,12 @@ heartbeatMs（当前 10 分钟）用于恢复扫描。插件重载或重新开�
 QQ 会话跑的是一个完整 DSH Agent，所以它能用 preset 给它的工具。当前挂的是
 **`qq-hosted`** 预设，刻意砍掉了 shell 和大批管理类工具：
 
-| 工具组 | 能干什么 |
-|---|---|
-| `mcp__qq__*` | QQ 聊天工具及会话工作区/文件发送 |
-| `qq_workspace` / `qq_send_file` | 在当前群或私聊独立目录里读写源码、打包 ZIP，再把文件发回当前会话 |
+| 工具组                                | 能干什么                                                                            |
+| ------------------------------------- | ----------------------------------------------------------------------------------- |
+| `mcp__qq__*`                          | QQ 聊天工具及会话工作区/文件发送                                                    |
+| `qq_workspace` / `qq_send_file`       | 在当前群或私聊独立目录里读写源码、打包 ZIP，再把文件发回当前会话                    |
 | `create_word_document` / `create_pdf` | 直接生成 .docx / .pdf（profile 级 document-editor MCP），产物落进本会话工作区再发回 |
-| `tool-web` | 按问题需要搜索网页、抓取资料，按实际来源回答 |
+| `tool-web`                            | 按问题需要搜索网页、抓取资料，按实际来源回答                                        |
 
 **砍掉的**：`tool-ask-user`（`ask_user_question`，2026-10-27 拔掉：它的提问卡只在
 DSH 桌面/Web 端等人点，QQ 回合没有 answerer，一问整轮就停在「等待你的操作」，
@@ -1191,28 +1528,28 @@ DSH 原生 `subagent` 一组（`subagent`/`subagent_fork`/`list_agents`/`send_me
 
 ### 5. 它能主动发的 QQ 动作（`mcp__qq__*`）
 
-| 工具 | 用途 |
-|---|---|
-| `qq_status` | 查链路 + 显示当前生效的授权、配额、图库占用 |
-| `qq_get_group_list` / `qq_get_friend_list` / `qq_get_group_member_list` | 查群、好友、群成员 |
-| `qq_send_group_msg` / `qq_send_private_msg` | 发文字、内置表情、图片、@ 某人 |
-| `qq_list_stickers` / `qq_send_sticker` | 从**本机表情包仓库**（`stickers/`）挑图发。⚠️ 该目录当前是空的，这条路现在发不出东西 |
-| `qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face` | 读**账号收藏表情**（真正在用的那条链路）；`qq_custom_face_sheet` 把上百张拼成一张带编号的总览图，**一眼看全、只算一张图的成本** |
-| `qq_send_mface` | 发 QQ 原生动画表情（收藏表情只能拿到静态首帧，要动图得走这个） |
-| `qq_send_ai_voice` | 用 **QQ 自带的 AI 语音**把文字念成语音发到群里（不依赖本地 TTS、不需显卡）；音色固定「傲娇少女」，没有挑选接口 |
-| `qq_send_voice` / `qq_voice_library` | 把**语音库里一段现成音频**当语音气泡发出去（点歌、哼一段），以及查看库里有哪几条；库在 `~/.dsh/qq-voices`，见「语音库」一节 |
-| `qq_collect_sticker` / `qq_list_library_stickers` / `qq_view_library_sticker` / `qq_send_library_sticker` | 内容寻址图库：收藏时记下"这张是什么情绪、什么时候用"，之后按情绪挑 |
-| `qq_reliability_status` | 查发送回执和**结果未知、需要人工核对**的发送 |
-| `qq_delete_msg` | 撤回自己发的消息 |
-| `qq_poke` | **戳一戳**某人（群里 / 私聊） |
-| `qq_react` / `qq_list_reactions` | **表情回应**：给消息加/撤小表情、看谁点了赞 |
-| `qq_group_info` | **群资料**：公告 / 精华 / 群文件目录 / **群历史消息** / 群信息 |
-| `qq_list_add_requests` | 看**待处理的加好友 / 入群申请**（只读，`read_requests` 权限） |
-| `qq_handle_add_request` | 同意 / 拒绝申请（`handle_request` 权限，**默认不授予**） |
-| `qq_manage_group` | **群管理**：禁言 / 解除禁言 / 改群名片 / 改群名 / 发·删群公告（踢人走审批，见 §10）|
-| `qq_request_kick` | **申请**踢人（登记成待办，**不立即执行**）|
-| `qq_pending_actions` | 查看待审批的写操作 / 批准 / 拒绝 |
-| `qq_search_history` | **只读 SQL** 查桥接缓存的聊天记录（`SELECT ... FROM messages`）|
+| 工具                                                                                                      | 用途                                                                                                                            |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `qq_status`                                                                                               | 查链路 + 显示当前生效的授权、配额、图库占用                                                                                     |
+| `qq_get_group_list` / `qq_get_friend_list` / `qq_get_group_member_list`                                   | 查群、好友、群成员                                                                                                              |
+| `qq_send_group_msg` / `qq_send_private_msg`                                                               | 发文字、内置表情、图片、@ 某人                                                                                                  |
+| `qq_list_stickers` / `qq_send_sticker`                                                                    | 从**本机表情包仓库**（`stickers/`）挑图发。⚠️ 该目录当前是空的，这条路现在发不出东西                                            |
+| `qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face`           | 读**账号收藏表情**（真正在用的那条链路）；`qq_custom_face_sheet` 把上百张拼成一张带编号的总览图，**一眼看全、只算一张图的成本** |
+| `qq_send_mface`                                                                                           | 发 QQ 原生动画表情（收藏表情只能拿到静态首帧，要动图得走这个）                                                                  |
+| `qq_send_ai_voice`                                                                                        | 用 **QQ 自带的 AI 语音**把文字念成语音发到群里（不依赖本地 TTS、不需显卡）；音色固定「傲娇少女」，没有挑选接口                  |
+| `qq_send_voice` / `qq_voice_library`                                                                      | 把**语音库里一段现成音频**当语音气泡发出去（点歌、哼一段），以及查看库里有哪几条；库在 `~/.dsh/qq-voices`，见「语音库」一节     |
+| `qq_collect_sticker` / `qq_list_library_stickers` / `qq_view_library_sticker` / `qq_send_library_sticker` | 内容寻址图库：收藏时记下"这张是什么情绪、什么时候用"，之后按情绪挑                                                              |
+| `qq_reliability_status`                                                                                   | 查发送回执和**结果未知、需要人工核对**的发送                                                                                    |
+| `qq_delete_msg`                                                                                           | 撤回自己发的消息                                                                                                                |
+| `qq_poke`                                                                                                 | **戳一戳**某人（群里 / 私聊）                                                                                                   |
+| `qq_react` / `qq_list_reactions`                                                                          | **表情回应**：给消息加/撤小表情、看谁点了赞                                                                                     |
+| `qq_group_info`                                                                                           | **群资料**：公告 / 精华 / 群文件目录 / **群历史消息** / 群信息                                                                  |
+| `qq_list_add_requests`                                                                                    | 看**待处理的加好友 / 入群申请**（只读，`read_requests` 权限）                                                                   |
+| `qq_handle_add_request`                                                                                   | 同意 / 拒绝申请（`handle_request` 权限，**默认不授予**）                                                                        |
+| `qq_manage_group`                                                                                         | **群管理**：禁言 / 解除禁言 / 改群名片 / 改群名 / 发·删群公告（踢人走审批，见 §10）                                             |
+| `qq_request_kick`                                                                                         | **申请**踢人（登记成待办，**不立即执行**）                                                                                      |
+| `qq_pending_actions`                                                                                      | 查看待审批的写操作 / 批准 / 拒绝                                                                                                |
+| `qq_search_history`                                                                                       | **只读 SQL** 查桥接缓存的聊天记录（`SELECT ... FROM messages`）                                                                 |
 
 共 **35 个工具**，分 **15 个能力位**：`send_text`、`send_file`、`send_image`、`send_sticker`、
 `send_voice`、`read_favorites`、`read_image`、`manage_group`、`set_profile`、`poke`、
@@ -1233,14 +1570,14 @@ DSH 原生 `subagent` 一组（`subagent`/`subagent_fork`/`list_agents`/`send_me
 
 实测拦截效果：
 
-| 尝试 | 结果 |
-|---|---|
-| `SELECT * FROM messages` | ✅ 通过 |
-| `SELECT * FROM events` | 🛑 `access to events.id is prohibited` |
-| `SELECT count(*) FROM (SELECT * FROM events)` | 🛑 被拒 |
-| `SELECT name FROM sqlite_master` | 🛑 被拒 |
-| `INSERT` / `DELETE` | 🛑 `readonly database` |
-| `ATTACH DATABASE ...` | 🛑 被拒 |
+| 尝试                                          | 结果                                   |
+| --------------------------------------------- | -------------------------------------- |
+| `SELECT * FROM messages`                      | ✅ 通过                                |
+| `SELECT * FROM events`                        | 🛑 `access to events.id is prohibited` |
+| `SELECT count(*) FROM (SELECT * FROM events)` | 🛑 被拒                                |
+| `SELECT name FROM sqlite_master`              | 🛑 被拒                                |
+| `INSERT` / `DELETE`                           | 🛑 `readonly database`                 |
+| `ATTACH DATABASE ...`                         | 🛑 被拒                                |
 
 **白名单为空时直接拒绝检索**（默认安全，不是默认放开）—— 否则没配白名单的人
 等于把整个聊天库交给模型。
@@ -1249,10 +1586,10 @@ DSH 原生 `subagent` 一组（`subagent`/`subagent_fork`/`list_agents`/`send_me
 
 **表情回应**比发言轻得多 —— 看到有意思的话点个赞，不用冒泡：
 
-| 工具 | 作用 |
-|---|---|
-| `qq_react` | 给某条消息加/撤一个小表情 |
-| `qq_list_reactions` | 看某条消息收到了哪些回应（谁点的、什么表情、几个人）|
+| 工具                | 作用                                                 |
+| ------------------- | ---------------------------------------------------- |
+| `qq_react`          | 给某条消息加/撤一个小表情                            |
+| `qq_list_reactions` | 看某条消息收到了哪些回应（谁点的、什么表情、几个人） |
 
 而且是**双向**的：别人给她自己的发言点了赞，桥接会记下来，作为上下文塞进
 **下一轮真正要说话时**的提示词里。
@@ -1265,32 +1602,42 @@ DSH 原生 `subagent` 一组（`subagent`/`subagent_fork`/`list_agents`/`send_me
 > 否则她会对着跟自己无关的话自作多情。这是个很难在真实群里发现、
 > 但很出戏的 bug，所以专门有测试钉住。
 
-#### 引用：只读不写
+#### 引用：读得到，也写得出了（2026-11-02 起）
 
 **别人发来的引用会被解析成上下文**（`resolveQuote`）—— 对方引用了哪条消息、
 那条的内容是什么，都会进提示词。不然模型只看到一个 `[引用]` 占位符，
 完全不知道对方在回复什么。
 
-但**她主动发引用**的功能已经**整块去掉**了。原来做的是
-`[引用]` 暗号 → OneBot 原生 `reply` 段，实测在群里会把 `[引用]`
-这个标记本身当正文发出去（用户看到的就是孤零零一行「[引用]」），
-而不是变成引用。既然不可靠，与其留着让人踩，不如去掉 ——
-让模型用正常文字表达"我在回谁"就够了。
+**她自己引用**：正文里写 `[引用:消息ID]`，那个气泡就带着 OneBot 原生 `reply`
+段发出去。和"当天就撤掉的旧暗号"的区别只有一个，但那一个是全部：**现在有目标**。
 
-> `test/deliver.test.mjs` 里有三条**防回归**测试钉住这个事实：
-> 一旦有人把引用发送加回来，它们会立刻变红。
+- 旧 `[引用]`（引"当前这条"）没有目标可校验，模型照着写会把标记本身发进群
+  （用户看到孤零零一行「[引用]」），所以整块撤掉。
+- 新写法带 ID，于是能校验：只认**本窗口里真出现过**的 ID（引一条不存在的会让
+  OneBot 退回整条消息，和 @ 不存在的成员同一个坑）。校验不过就把标记摘掉、
+  正文照发；`[引用]` 光秃秃留在正文里也只会被摘掉，不会变成语法泄漏。
+- 关掉：`quoteReplyEnabled: false`（标记仍然被摘干净，只是不挂 reply 段）。
+
+> 三条 `test/deliver.test.mjs` 的用例钉住这件事：挂上 reply 段 / 摘掉不存在的
+> ID / 光秃秃的 `[引用]` 不留字。旧版那三条"引用功能已移除"的防回归测试随
+> 本次改动一起改成新契约。
+
+**同一批修掉的 @ 漏判（2026-11-02）**：`[ @昵称 ]`（方括号里带空格）以前会被
+**整段跳过** —— 快路径写的是 `includes('[@')`，主正则却是 `\[\s*@`。线上实例：
+17:42 群里收到「[ @好运成双倍 ] 那你告诉告诉我嘛」。现在两处判据同源；
+框外的标记（`[@小林]『你说啥』`）也会被搬进最近的气泡，不再静默消失。
 
 ### 7. 群资料按需读取
 
 `qq_group_info` 五个 action，都是**按需拉取**，不会自动进上下文：
 
-| action | 内容 |
-|---|---|
-| `notice` | 群公告（正文、发布者、时间） |
-| `essence` | 群精华消息 |
-| `files` | 群文件目录，可下钻 `folder_id` |
+| action    | 内容                             |
+| --------- | -------------------------------- |
+| `notice`  | 群公告（正文、发布者、时间）     |
+| `essence` | 群精华消息                       |
+| `files`   | 群文件目录，可下钻 `folder_id`   |
 | `history` | **群历史消息** —— 靠 OneBot 回读 |
-| `info` | 群名、人数 |
+| `info`    | 群名、人数                       |
 
 ### 8. 上下文直接来自 QQ 历史（不是桥接自己的记录）
 
@@ -1319,12 +1666,12 @@ DSH 原生 `subagent` 一组（`subagent`/`subagent_fork`/`list_agents`/`send_me
   桥接收不到自己发出的消息，只有回读才能看见
 - 窗口立刻被最近 N 条真实对话填满，不依赖缓冲有没有攒够
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `contextFromQQHistory` | `true` | 关掉就不回读，退回桥接自己的窗口 |
-| `contextHistoryCount` | `25` | 回读多少条；desktop profile 当前为 40 |
-| `contextHistoryCacheMs` | `20000` | 回读结果缓存多久（0 = 每轮都拉）|
-| `contextHistoryTimeoutMs` | `3000` | 回读最多等多久；超时退回内存窗口照常回答，记 `historyFetchTimeouts` |
+| 配置                      | 默认    | 说明                                                                |
+| ------------------------- | ------- | ------------------------------------------------------------------- |
+| `contextFromQQHistory`    | `true`  | 关掉就不回读，退回桥接自己的窗口                                    |
+| `contextHistoryCount`     | `25`    | 回读多少条；desktop profile 当前为 40                               |
+| `contextHistoryCacheMs`   | `20000` | 回读结果缓存多久（0 = 每轮都拉）                                    |
+| `contextHistoryTimeoutMs` | `3000`  | 回读最多等多久；超时退回内存窗口照常回答，记 `historyFetchTimeouts` |
 
 回读失败**不影响发言**：catch 住、记一笔 `historyFetchFailed`、退回原窗口。
 
@@ -1344,21 +1691,21 @@ OneBot 的 `request` 类上报（`friend` / `group` 两种）原来被**整类�
 
 现在会：**落库 + 私聊通知你**。
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `notifyUsers` | `[]` | 申请转发给哪些 QQ 号（**只走私聊**）|
-| `autoHandleRequests` | `false` | 是否自动同意 |
-| `autoHandleRequestAction` | `'approve'` | 自动处理时是同意还是拒绝 |
+| 配置                      | 默认        | 说明                                 |
+| ------------------------- | ----------- | ------------------------------------ |
+| `notifyUsers`             | `[]`        | 申请转发给哪些 QQ 号（**只走私聊**） |
+| `autoHandleRequests`      | `false`     | 是否自动同意                         |
+| `autoHandleRequestAction` | `'approve'` | 自动处理时是同意还是拒绝             |
 
 **为什么默认不自动同意**：同意加好友 = 让一个陌生人以后能给你的 Agent 发消息。
 在白名单为空时尤其危险 —— 等于对全网开放。所以默认只转发给人，由人手动处理。
 
 `qq-mcp` 侧也对应地分成了两个能力位：
 
-| 能力位 | 工具 | 风险 |
-|---|---|---|
-| `read_requests` | `qq_list_add_requests` | 低 —— 只是"看一眼有哪些申请" |
-| `handle_request` | `qq_handle_add_request` | **最高** —— 放陌生人进来 |
+| 能力位           | 工具                    | 风险                         |
+| ---------------- | ----------------------- | ---------------------------- |
+| `read_requests`  | `qq_list_add_requests`  | 低 —— 只是"看一眼有哪些申请" |
+| `handle_request` | `qq_handle_add_request` | **最高** —— 放陌生人进来     |
 
 **故意分成两位**：合成一个的话，想看一眼申请就不得不把"能同意"也一起授出去。
 当前 profile 里**没有授予 `handle_request`**，所以 Agent 没有任何工具能同意申请。
@@ -1367,15 +1714,15 @@ OneBot 的 `request` 类上报（`friend` / `group` 两种）原来被**整类�
 
 `qq_manage_group` 支持七个动作，但**踢人不再直接执行**：
 
-| action | 作用 | 是否直接执行 |
-|---|---|---|
-| `ban` | 禁言（`duration` 秒，**必须 > 0**）| ✅ 直接执行 |
-| `unban` | 解除禁言 | ✅ 直接执行 |
-| `set_card` | 改群名片 | ✅ 直接执行 |
-| `set_group_name` | 改群名 | ✅ 直接执行 |
-| `notice_set` | 发群公告（`content`，可选 `pinned` / `confirm_required`）| ✅ 直接执行 |
-| `notice_del` | 删群公告（`notice_id`，先用 `qq_group_info action=notice` 查）| ✅ 直接执行 |
-| `kick` | 踢出 | ❌ **转成待审批** |
+| action           | 作用                                                           | 是否直接执行      |
+| ---------------- | -------------------------------------------------------------- | ----------------- |
+| `ban`            | 禁言（`duration` 秒，**必须 > 0**）                            | ✅ 直接执行       |
+| `unban`          | 解除禁言                                                       | ✅ 直接执行       |
+| `set_card`       | 改群名片                                                       | ✅ 直接执行       |
+| `set_group_name` | 改群名                                                         | ✅ 直接执行       |
+| `notice_set`     | 发群公告（`content`，可选 `pinned` / `confirm_required`）      | ✅ 直接执行       |
+| `notice_del`     | 删群公告（`notice_id`，先用 `qq_group_info action=notice` 查） | ✅ 直接执行       |
+| `kick`           | 踢出                                                           | ❌ **转成待审批** |
 
 **群公告的两点特殊性**（所以除了每分钟的管理闸，还单加了一道 `QQ_QUOTA_NOTICE_PER_HOUR`，默认 6/小时）：
 
@@ -1389,15 +1736,15 @@ OneBot 的 `request` 类上报（`friend` / `group` 两种）原来被**整类�
 
 **每个写动作都会当场回读一次**，返回里带「回读确认：…」的才是事实：
 
-| 动作 | 回读方式 |
-|---|---|
-| `set_group_name` | `get_group_list {no_cache:true}` → 群名 |
-| `set_card` | `get_group_member_info {no_cache:true}` → `card` |
-| `ban` / `unban` | 同上 → `shut_up_timestamp`（>0 才是禁言中）|
-| `notice_set` | `_get_group_notice` 列表里找同正文的那条 → 带回 `notice_id` |
-| `notice_del` | 同上，确认该 `notice_id` 已不在列表 |
-| `qq_pending_actions` 批准踢人 | `get_group_member_list {no_cache:true}`，确认人真的不在了 |
-| `qq_set_profile`（昵称/签名）| `get_stranger_info {no_cache:true}`，并读 QQ 侧 `result/errMsg` |
+| 动作                          | 回读方式                                                        |
+| ----------------------------- | --------------------------------------------------------------- |
+| `set_group_name`              | `get_group_list {no_cache:true}` → 群名                         |
+| `set_card`                    | `get_group_member_info {no_cache:true}` → `card`                |
+| `ban` / `unban`               | 同上 → `shut_up_timestamp`（>0 才是禁言中）                     |
+| `notice_set`                  | `_get_group_notice` 列表里找同正文的那条 → 带回 `notice_id`     |
+| `notice_del`                  | 同上，确认该 `notice_id` 已不在列表                             |
+| `qq_pending_actions` 批准踢人 | `get_group_member_list {no_cache:true}`，确认人真的不在了       |
+| `qq_set_profile`（昵称/签名） | `get_stranger_info {no_cache:true}`，并读 QQ 侧 `result/errMsg` |
 
 没生效就**明说「⚠️ 没生效」**（并给出当前实际值），读接口失败则标注「没能回读核实」——
 不允许把"提交成功"说成"已经改好"。`qq_group_info action=info` 的群名与 `qq_status`
@@ -1405,11 +1752,11 @@ OneBot 的 `request` 类上报（`friend` / `group` 两种）原来被**整类�
 
 > ⚠️ **SnowLuma 的读接口有缓存，这是这个功能最大的坑**（2026-10-12 实测，同一时刻）：
 >
-> | 读法 | 结果 |
-> |---|---|
-> | `get_group_info`（旧实现用的）| 「杯满之灿幻庄」← 旧名 |
-> | `get_group_list {no_cache:true}` | 「小鲸鱼的白饭食堂」← 真名 |
-> | `get_login_info`（本地 selfInfo）| 「DeepSeek小鲸鱼」← 旧昵称 |
+> | 读法                                | 结果                         |
+> | ----------------------------------- | ---------------------------- |
+> | `get_group_info`（旧实现用的）      | 「杯满之灿幻庄」← 旧名       |
+> | `get_group_list {no_cache:true}`    | 「小鲸鱼的白饭食堂」← 真名   |
+> | `get_login_info`（本地 selfInfo）   | 「DeepSeek小鲸鱼」← 旧昵称   |
 > | `get_stranger_info {no_cache:true}` | 「有穹的地方就有我」← 真昵称 |
 >
 > 所以**任何"确认改没改成功"的读都必须走 `no_cache`**；用缓存读会让她以为没改成，
@@ -1460,18 +1807,18 @@ OneBot 有四类上报：`message`、`message_sent`、`notice`（戳一戳、输
 到此为止。**不会每戳一下就生成一句回复**，也不会让模型去评论桥接合成的
 「（对方戳了你一下）」。这是最像真人的一条：被戳是"引起注意"，不是"提出问题"。
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `pokeReplyEnabled` | `false` | 总开关。**第一道闸门**，关着就什么都不做 |
-| `pokeReplyMode` | `'wake'` | `wake` = 回戳 + 开清醒窗口；`text` = 回固定文案；`agent` = 完整回合 |
-| `pokeReplyMinIntervalMs` | `10000` | wake / text 的全局最小间隔 |
-| `pokeReplyPerSenderPerHour` | `5` | wake / text 每人每小时上限（落盘）|
-| `pokeReplyGroups` | `[]` | 群里只回戳这些群（仍受 `groups` 白名单约束）|
-| `pokeReplyGroupText` | `true` | `text` 模式群里是否也说一句 |
-| `pokeAgentMinIntervalMs` | `30000` | `agent` 模式的全局最小间隔 |
-| `pokeAgentPerSenderPerHour` | `6` | `agent` 模式每人每小时上限（落盘）|
-| `pokeAgentSendPoke` | `true` | `agent` 模式是否先自动回戳 |
-| `pokeAgentGroupText` | `true` | `agent` 模式群里是否也回话 |
+| 配置                        | 默认     | 说明                                                                |
+| --------------------------- | -------- | ------------------------------------------------------------------- |
+| `pokeReplyEnabled`          | `false`  | 总开关。**第一道闸门**，关着就什么都不做                            |
+| `pokeReplyMode`             | `'wake'` | `wake` = 回戳 + 开清醒窗口；`text` = 回固定文案；`agent` = 完整回合 |
+| `pokeReplyMinIntervalMs`    | `10000`  | wake / text 的全局最小间隔                                          |
+| `pokeReplyPerSenderPerHour` | `5`      | wake / text 每人每小时上限（落盘）                                  |
+| `pokeReplyGroups`           | `[]`     | 群里只回戳这些群（仍受 `groups` 白名单约束）                        |
+| `pokeReplyGroupText`        | `true`   | `text` 模式群里是否也说一句                                         |
+| `pokeAgentMinIntervalMs`    | `30000`  | `agent` 模式的全局最小间隔                                          |
+| `pokeAgentPerSenderPerHour` | `6`      | `agent` 模式每人每小时上限（落盘）                                  |
+| `pokeAgentSendPoke`         | `true`   | `agent` 模式是否先自动回戳                                          |
+| `pokeAgentGroupText`        | `true`   | `agent` 模式群里是否也回话                                          |
 
 实现上的几个取舍：
 
@@ -1518,11 +1865,11 @@ OneBot 有四类上报：`message`、`message_sent`、`notice`（戳一戳、输
 
 现在 `toneAnchor` 默认**空**：语气完全由 `persona.md` 单点决定。
 
-| 想要的效果 | 做法 |
-|---|---|
-| 语气只由人设文件决定 | 什么都不用配（默认） |
-| 觉得它"忘了自己是谁" | 配一句**短的** `toneAnchor`（它每轮都注入，长句很贵） |
-| 彻底回到每轮注入完整人设 | `injectStaticOnce: false` |
+| 想要的效果               | 做法                                                  |
+| ------------------------ | ----------------------------------------------------- |
+| 语气只由人设文件决定     | 什么都不用配（默认）                                  |
+| 觉得它"忘了自己是谁"     | 配一句**短的** `toneAnchor`（它每轮都注入，长句很贵） |
+| 彻底回到每轮注入完整人设 | `injectStaticOnce: false`                             |
 
 ### 14. QQ 专用预设（降本 + 提安全）
 
@@ -1558,10 +1905,10 @@ agentPreset: qq-hosted
 
 实测效果：
 
-| 指标 | 换之前 | 换之后 |
-|---|---|---|
-| system 文本 | 6348 字符 ≈3734 token | 4618 字符 ≈2716 token（**−27%**） |
-| 首轮输入（含历史） | 24692 | 20102（**−4590**） |
+| 指标               | 换之前                | 换之后                            |
+| ------------------ | --------------------- | --------------------------------- |
+| system 文本        | 6348 字符 ≈3734 token | 4618 字符 ≈2716 token（**−27%**） |
+| 首轮输入（含历史） | 24692                 | 20102（**−4590**）                |
 
 两个数的口径不同：工具 schema 的 JSON **不在 system 文本里**（单独发），
 所以 −27% 只是下限；首轮那个 −4590 是真实计费差，但两次会话历史不同，也是下界。
@@ -1584,7 +1931,7 @@ profile 里有一段配置，把**整个插件源码目录**加进了 DSH 的 HM
 
 ```yaml
 - id: hmr
-  root: [ '.', 'D:/Code/dsh-qq-bridge' ]
+  root: [".", "D:/Code/dsh-qq-bridge"]
 ```
 
 `dsh-hmr` 用 chokidar 监视这个 root，而它默认的 `ignored` 只有
@@ -1616,38 +1963,38 @@ profile 里有一段配置，把**整个插件源码目录**加进了 DSH 的 HM
 
 ### 16. 当前实际配置速查
 
-| 项 | 当前值 |
-|---|---|
-| 托管开关 | **开**（且**持久化** —— 存进 `runtime_state` 表，重载后保持）|
-| 机器人 QQ | `3667925015` |
-| 群聊触发 | 只有被 @ 或叫 `deepseek` / `大肥鱼` |
-| 群/人白名单 | **空 = 不限制**（建议填！） |
-| QQ 专用模型 | `a6api/deepseek-v4.1-flash-1017`（2026-10-23 从旧 id `deepseek-v4.1-flash` 切到带日期的快照；providers 名录里只登记了这个 id，且已声明 `input: [text, image]`，识图实测 4/4） |
-| 思考等级 | **`off`**（群聊要的是"快嘴回一句"，不是深度推理；也省输出 token）|
-| 工作目录 | `D:\作业\计算机组成原理` |
-| 心跳 | 开，每群第 6 条未读或等待 5 分钟到期时判断；10 分钟兜底扫描 |
-| 上下文来源 | **QQ 历史直读**（`contextFromQQHistory: true`，25 条，20 秒缓存）|
-| 上下文条数 | 别人的 10 条 + 自己的 15 条，**从新到旧**，紧贴当前消息上方 |
-| 记忆 | 开，20 条上限，按 QQ 号一份 |
-| 调试命令 | 仅 `1056612947` |
-| 戳一戳回应 | 开，`wake` 模式（回戳 + 60 秒清醒窗口，不提交 DSH），全局间隔 10s，每人 5 次/小时 |
-| 申请通知 | 开，发给 `1056612947` |
-| 申请自动处理 | **关**（只转发给人，绝不自动同意） |
-| 踢人 | **必须人批准**（走 `pending_actions` 待办）|
-| 引用发送 | **已移除**（原来会把 `[引用]` 当正文发出去）|
-| qq-mcp 能力位 | `send_text, send_sticker, read_favorites, read_image, manage_group, poke, read_requests, react, read_group_info` —— **不含 `handle_request`** |
-| Agent 预设 | `qq-hosted`（工具受限，来自 `dsh-qq-preset` bundle） |
-| 语气锚 | 空（语气只由 `persona.md` 决定） |
+| 项            | 当前值                                                                                                                                                                        |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 托管开关      | **开**（且**持久化** —— 存进 `runtime_state` 表，重载后保持）                                                                                                                 |
+| 机器人 QQ     | `3667925015`                                                                                                                                                                  |
+| 群聊触发      | 只有被 @ 或叫 `deepseek` / `大肥鱼`                                                                                                                                           |
+| 群/人白名单   | **空 = 不限制**（建议填！）                                                                                                                                                   |
+| QQ 专用模型   | `a6api/deepseek-v4.1-flash-1017`（2026-10-23 从旧 id `deepseek-v4.1-flash` 切到带日期的快照；providers 名录里只登记了这个 id，且已声明 `input: [text, image]`，识图实测 4/4） |
+| 思考等级      | **`off`**（群聊要的是"快嘴回一句"，不是深度推理；也省输出 token）                                                                                                             |
+| 工作目录      | `D:\作业\计算机组成原理`                                                                                                                                                      |
+| 心跳          | 开，每群第 6 条未读或等待 5 分钟到期时判断；10 分钟兜底扫描                                                                                                                   |
+| 上下文来源    | **QQ 历史直读**（`contextFromQQHistory: true`，25 条，20 秒缓存）                                                                                                             |
+| 上下文条数    | 别人的 10 条 + 自己的 15 条，**从新到旧**，紧贴当前消息上方                                                                                                                   |
+| 记忆          | 开，20 条上限，按 QQ 号一份                                                                                                                                                   |
+| 调试命令      | 仅 `1056612947`                                                                                                                                                               |
+| 戳一戳回应    | 开，`wake` 模式（回戳 + 60 秒清醒窗口，不提交 DSH），全局间隔 10s，每人 5 次/小时                                                                                             |
+| 申请通知      | 开，发给 `1056612947`                                                                                                                                                         |
+| 申请自动处理  | **关**（只转发给人，绝不自动同意）                                                                                                                                            |
+| 踢人          | **必须人批准**（走 `pending_actions` 待办）                                                                                                                                   |
+| 引用发送      | 开（`[引用:消息ID]`，只认本窗口出现过的 ID；旧的无目标 `[引用]` 暗号仍然是摘掉不发）                                                                                         |
+| qq-mcp 能力位 | `send_text, send_sticker, read_favorites, read_image, manage_group, poke, read_requests, react, read_group_info` —— **不含 `handle_request`**                                 |
+| Agent 预设    | `qq-hosted`（工具受限，来自 `dsh-qq-preset` bundle）                                                                                                                          |
+| 语气锚        | 空（语气只由 `persona.md` 决定）                                                                                                                                              |
 
 ## 托管控制
 
 托管要**同时**满足三个条件才真正生效，缺一个对方发消息都没人回：
 
-| 层 | 含义 |
-|---|---|
-| DSH 进程在跑 | 插件、会话、LLM 都在 DSH 里 |
+| 层                 | 含义                            |
+| ------------------ | ------------------------------- |
+| DSH 进程在跑       | 插件、会话、LLM 都在 DSH 里     |
 | SnowLuma 已接入 QQ | 没有它，QQ 的消息根本到不了 DSH |
-| 托管开关为开 | 本插件的软开关 |
+| 托管开关为开       | 本插件的软开关                  |
 
 **软开关**让你不必碰 QQ 就能暂停/恢复 Agent：
 
@@ -1676,11 +2023,11 @@ node tools/dsh-guard.mjs watch       # 守护：掉了先修剪再拉起，退�
 
 三层保护：
 
-| 什么时候 | 谁来做 | 行为 |
-|---|---|---|
-| 用 `start-dsh.ps1` / 控制台启动 | 脚本自己 | 启动前自动 `prune`，DSH 没跑才动手 |
-| 你自己双击 DSH | `dsh-watch.bat`（双击后窗口留着） | 30 秒探一次，发现它掉了就修剪 + 拉起，日志同时写 `%TEMP%\qq-dsh-watch.log` |
-| 想先诊断 | `node tools/dsh-guard.mjs status` | 顺带把最近一次崩溃分三类：认证失败 / 热重载竞态 / 其他 |
+| 什么时候                        | 谁来做                            | 行为                                                                       |
+| ------------------------------- | --------------------------------- | -------------------------------------------------------------------------- |
+| 用 `start-dsh.ps1` / 控制台启动 | 脚本自己                          | 启动前自动 `prune`，DSH 没跑才动手                                         |
+| 你自己双击 DSH                  | `dsh-watch.bat`（双击后窗口留着） | 30 秒探一次，发现它掉了就修剪 + 拉起，日志同时写 `%TEMP%\qq-dsh-watch.log` |
+| 想先诊断                        | `node tools/dsh-guard.mjs status` | 顺带把最近一次崩溃分三类：认证失败 / 热重载竞态 / 其他                     |
 
 两条硬约束：
 
@@ -1699,11 +2046,11 @@ console.bat -Stop                        # 停掉控制台（DSH / QQ 一概不�
 
 它把三件事分开报，因为它们的修法完全不同：
 
-| 卡片 | 怎么判 | 挂了会怎样 |
-|---|---|---|
-| **DSH** | 进程名像 `DeepSeek Harness` 的 pid → 它名下 LISTEN 的端口（`netstat -ano` + `tasklist /FO CSV`） | 全都没了，页面还在 |
-| **桥接** | 拿上面这些端口逐个 GET `/qq/onebot`，只认带 `ok`/`agentEnabled` 的 JSON | DSH 在跑但插件没加载 → 卡片显示「DSH 在跑，但 /qq/onebot 没响应」 |
-| **SnowLuma** | `POST 127.0.0.1:16000/get_status` + `get_login_info`（令牌从 `config/onebot_<uin>.json` 读，不出服务端） | 接口在但账号掉了 → 「接口在，账号没就绪」，和"没启动"分得开 |
+| 卡片         | 怎么判                                                                                                   | 挂了会怎样                                                        |
+| ------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **DSH**      | 进程名像 `DeepSeek Harness` 的 pid → 它名下 LISTEN 的端口（`netstat -ano` + `tasklist /FO CSV`）         | 全都没了，页面还在                                                |
+| **桥接**     | 拿上面这些端口逐个 GET `/qq/onebot`，只认带 `ok`/`agentEnabled` 的 JSON                                  | DSH 在跑但插件没加载 → 卡片显示「DSH 在跑，但 /qq/onebot 没响应」 |
+| **SnowLuma** | `POST 127.0.0.1:16000/get_status` + `get_login_info`（令牌从 `config/onebot_<uin>.json` 读，不出服务端） | 接口在但账号掉了 → 「接口在，账号没就绪」，和"没启动"分得开       |
 
 能点的事：**一键启动全部**、单独启动 DSH、启动接入、开/关托管、重置托管、打开 DSH、打开面板。
 
@@ -1713,15 +2060,15 @@ console.bat -Stop                        # 停掉控制台（DSH / QQ 一概不�
 
 配置全走环境变量（都能在 `--flag` 形式下覆盖，因为 WMI 起进程带不了环境变量）：
 
-| 变量 | 默认 | 用途 |
-|---|---|---|
-| `QQ_CONSOLE_PORT` | 7788 | 控制台端口 |
-| `QQ_ONEBOT` | `http://127.0.0.1:16000` | SnowLuma 的 OneBot 接口 |
-| `QQ_SNOWLUMA_DIR` | `..\..\SnowLuma-validation\runtime` | 读 OneBot 令牌用 |
-| `QQ_DSH_EXE` | 自动 | DSH 可执行文件，猜不到时指给它 |
-| `QQ_BRIDGE` | 自动发现 | 直接指定桥接地址 |
-| `QQ_PANEL_TOKEN` | 空 | 桥接配了 token 时用（只留在服务端） |
-| `QQ_CONSOLE_TOKEN` | 空 | 给控制台自己加一道口令 |
+| 变量               | 默认                                | 用途                                |
+| ------------------ | ----------------------------------- | ----------------------------------- |
+| `QQ_CONSOLE_PORT`  | 7788                                | 控制台端口                          |
+| `QQ_ONEBOT`        | `http://127.0.0.1:16000`            | SnowLuma 的 OneBot 接口             |
+| `QQ_SNOWLUMA_DIR`  | `..\..\SnowLuma-validation\runtime` | 读 OneBot 令牌用                    |
+| `QQ_DSH_EXE`       | 自动                                | DSH 可执行文件，猜不到时指给它      |
+| `QQ_BRIDGE`        | 自动发现                            | 直接指定桥接地址                    |
+| `QQ_PANEL_TOKEN`   | 空                                  | 桥接配了 token 时用（只留在服务端） |
+| `QQ_CONSOLE_TOKEN` | 空                                  | 给控制台自己加一道口令              |
 
 安全边界：只监听 `127.0.0.1`；写接口（`POST /api/action`）带 Origin 就必须与 Host 同源，`Sec-Fetch-Site: cross-site` 一律 403 —— 这个进程能拉起进程，不能让任意网页 POST 进来。它没有退出登录、没有端口转发，不会出现在局域网里。
 
@@ -1747,17 +2094,17 @@ open-panel.bat -NoOpen         只打印地址
 
 逻辑在 `tools/open-panel.ps1`；`.bat` 只做一层 ASCII 转发（cmd 按 OEM 代码页逐字节读 bat，中文会碎，跟 `start-qq-mcp.bat` 同一个理由）。
 
-| 你看到的 | 它怎么来的 |
-|---|---|
-| 顶部判定条 | `lib/panel/verdicts.mjs` 纯函数（零依赖，node 单测和浏览器跑同一份源码），红 > 黄 > 灰排序，每条带「看明细 →」跳到对应 tab |
-| 判断流 | `status.auxDecisions`：最近 80 条辅助判断，每条带「判的是哪句话 / 结论 / 模型自己给的理由 / 它吐的原文」，可展开原文、按调用点筛选、「只看没接」。本地规则裁决（被 @ 别人、叫她名字、三条护栏、fail-open）也进流，但不计入 `auxHealth` 的成功率 |
-| 会话表 | `awake` + `heartbeat.groups` 拼的，默认只列 24h 内有动静或清醒中的，勾「显示全部」看全量 |
-| 任务 / 投递 | `tasks`（含排队输入与活跃执行）、`replyDelivery` 的待送达与最近失败 |
-| 失败面 | `reliability` + `stats.recovery` + `stats.lastError`，底部是处置记录 |
-| 设置 | `lib/admin/spec.mjs` 白名单 + `GET/POST /qq/onebot/admin/*` |
-| 记忆 | `memory/` 目录（`diary.md`、人物卡、`groups/`） |
-| 运行状态（右栏） | 最后一个回合、参与决策/心跳的比例计数、prompt 组成、模型与档位、辅助层成功率、登录、出站队列 |
-| 原始 JSON | 折叠在底部，接口原样，没美化 |
+| 你看到的         | 它怎么来的                                                                                                                                                                                                                                      |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 顶部判定条       | `lib/panel/verdicts.mjs` 纯函数（零依赖，node 单测和浏览器跑同一份源码），红 > 黄 > 灰排序，每条带「看明细 →」跳到对应 tab                                                                                                                      |
+| 判断流           | `status.auxDecisions`：最近 80 条辅助判断，每条带「判的是哪句话 / 结论 / 模型自己给的理由 / 它吐的原文」，可展开原文、按调用点筛选、「只看没接」。本地规则裁决（被 @ 别人、叫她名字、三条护栏、fail-open）也进流，但不计入 `auxHealth` 的成功率 |
+| 会话表           | `awake` + `heartbeat.groups` 拼的，默认只列 24h 内有动静或清醒中的，勾「显示全部」看全量                                                                                                                                                        |
+| 任务 / 投递      | `tasks`（含排队输入与活跃执行）、`replyDelivery` 的待送达与最近失败                                                                                                                                                                             |
+| 失败面           | `reliability` + `stats.recovery` + `stats.lastError`，底部是处置记录                                                                                                                                                                            |
+| 设置             | `lib/admin/spec.mjs` 白名单 + `GET/POST /qq/onebot/admin/*`                                                                                                                                                                                     |
+| 记忆             | `memory/` 目录（`diary.md`、人物卡、`groups/`）                                                                                                                                                                                                 |
+| 运行状态（右栏） | 最后一个回合、参与决策/心跳的比例计数、prompt 组成、模型与档位、辅助层成功率、登录、出站队列                                                                                                                                                    |
+| 原始 JSON        | 折叠在底部，接口原样，没美化                                                                                                                                                                                                                    |
 
 右上角的托管开关走 `POST /qq/onebot/control`（`confirm` 一次才发）。`?tab=delivery` / `?tab=failures` / `?tab=settings` / `?tab=memory` 可以直接落到某个 tab。
 
@@ -1780,12 +2127,12 @@ open-panel.bat -NoOpen         只打印地址
 
 生效时机：
 
-| 改什么 | 什么时候生效 |
-|---|---|
-| 人设 / 规矩 / 示例 | 下一轮（`resolveTextField` 按 mtime 重读，不用重载） |
-| 注入开关、轮数、字符预算 | 下一轮（`execute-turn` / `context` 每轮读 config） |
-| 主 / aux 模型 | 下一条会话新建时；已存在的会话不变 |
-| 心跳参数 | 下一个判断周期 |
+| 改什么                   | 什么时候生效                                         |
+| ------------------------ | ---------------------------------------------------- |
+| 人设 / 规矩 / 示例       | 下一轮（`resolveTextField` 按 mtime 重读，不用重载） |
+| 注入开关、轮数、字符预算 | 下一轮（`execute-turn` / `context` 每轮读 config）   |
+| 主 / aux 模型            | 下一条会话新建时；已存在的会话不变                   |
+| 心跳参数                 | 下一个判断周期                                       |
 
 #### 记忆 tab：日记、人物卡、群记录
 
@@ -1797,14 +2144,14 @@ open-panel.bat -NoOpen         只打印地址
 
 看见红的之后，原先是"知道哪坏了，然后开命令行"。现在每个出问题的行都带按钮，走同一条后端通道 `POST /qq/onebot/admin/action`（清单：`GET /qq/onebot/admin/actions`）：
 
-| 动作 | 出现在哪 | 干什么 |
-|---|---|---|
-| `receipt.markSent` / `receipt.markFailed` | 失败面「待核对回执」每一行 | 人工核对 UNKNOWN 回执后把它定成"真发出去了/确实没发"，别让它一直占着待核对列表 |
-| `delivery.retry` / `delivery.abandon` | 投递 tab「待送达」每一行 | 重排一次（`retryAt` 设为现在）或彻底放弃（`state='failed'`，详情写"已放弃恢复"） |
-| `task.settle` | 任务 tab「活跃任务」每一行 | 把卡住的执行判死（`failed` + `panelNote`）。**只判死，不谎报 done** |
-| `queue.flush` | 判定条「队列在途」 | 立刻催一次出站队列，把在途时间清掉 |
-| `conversation.reset` | 代码调用 / 后续会话页 | 清掉某个会话的上下文与窗口（危险动作，要 `confirm: true`） |
-| `heartbeat.poke` | 设置页心跳现状表每一行 | 跳过冷却，立刻判一次"这个群该不该插话" |
+| 动作                                      | 出现在哪                   | 干什么                                                                           |
+| ----------------------------------------- | -------------------------- | -------------------------------------------------------------------------------- |
+| `receipt.markSent` / `receipt.markFailed` | 失败面「待核对回执」每一行 | 人工核对 UNKNOWN 回执后把它定成"真发出去了/确实没发"，别让它一直占着待核对列表   |
+| `delivery.retry` / `delivery.abandon`     | 投递 tab「待送达」每一行   | 重排一次（`retryAt` 设为现在）或彻底放弃（`state='failed'`，详情写"已放弃恢复"） |
+| `task.settle`                             | 任务 tab「活跃任务」每一行 | 把卡住的执行判死（`failed` + `panelNote`）。**只判死，不谎报 done**              |
+| `queue.flush`                             | 判定条「队列在途」         | 立刻催一次出站队列，把在途时间清掉                                               |
+| `conversation.reset`                      | 代码调用 / 后续会话页      | 清掉某个会话的上下文与窗口（危险动作，要 `confirm: true`）                       |
+| `heartbeat.poke`                          | 设置页心跳现状表每一行     | 跳过冷却，立刻判一次"这个群该不该插话"                                           |
 
 几条写死的规矩：
 
@@ -1833,19 +2180,19 @@ QQ 会主动把一次登录判为失效。SnowLuma 日志里的原文是：
 `get_status` 和 `get_login_info`，把状态迁移记下来，并在自检接口暴露成 `登录` 字段。
 它**不会自动重登** —— 凭据由 QQ 管理，擅自重试只会加重风控；能做的只有"如实报告 + 等人扫码"。
 
-| 配置 | 默认 | 作用 |
-|---|---|---|
-| `loginWatchEnabled` | `true` | 总开关。只读探测，不改账号、不发消息 |
-| `loginWatchMs` | `60000` | 探测间隔；越密越准，代价是一次本地 HTTP 调用 |
-| `loginWatchFailureThreshold` | `3` | 连续失败几次才记一次掉线（OneBot 明确回 `offline` 时**立即**记，不等阈值） |
-| `loginWatchTimeoutMs` | `4000` | 单次探测超时；上限是间隔的一半，防止探测堆在一起 |
-| `loginWatchHistoryLimit` | `10` | 自检里回显最近几次掉线；`0` = 全部 |
-| `qqntDir` | `C:\Program Files\Tencent\QQNT` | 读"当前生效的 QQNT build"，用来核对"是不是版本一换就掉线" |
-| `qqntDataDir` | `E:\QQFile\message\Tencent Files` | QQ 数据根，用来定位登录票据 |
-| `loginAccountDir` | 空 | 直接指定账号数据目录；留空按 `<qqntDataDir>\<QQ号>` 拼 |
-| `loginEnvCacheMs` | `300000` | 环境快照缓存；掉线时会强制重拍，不受缓存影响 |
-| `loginAlertEnabled` | `true` | 掉线/恢复是否往盘上写一行告警 |
-| `loginAlertFile` | `login-alerts.log` | 告警文件名（相对数据目录）或绝对路径 |
+| 配置                         | 默认                              | 作用                                                                       |
+| ---------------------------- | --------------------------------- | -------------------------------------------------------------------------- |
+| `loginWatchEnabled`          | `true`                            | 总开关。只读探测，不改账号、不发消息                                       |
+| `loginWatchMs`               | `60000`                           | 探测间隔；越密越准，代价是一次本地 HTTP 调用                               |
+| `loginWatchFailureThreshold` | `3`                               | 连续失败几次才记一次掉线（OneBot 明确回 `offline` 时**立即**记，不等阈值） |
+| `loginWatchTimeoutMs`        | `4000`                            | 单次探测超时；上限是间隔的一半，防止探测堆在一起                           |
+| `loginWatchHistoryLimit`     | `10`                              | 自检里回显最近几次掉线；`0` = 全部                                         |
+| `qqntDir`                    | `C:\Program Files\Tencent\QQNT`   | 读"当前生效的 QQNT build"，用来核对"是不是版本一换就掉线"                  |
+| `qqntDataDir`                | `E:\QQFile\message\Tencent Files` | QQ 数据根，用来定位登录票据                                                |
+| `loginAccountDir`            | 空                                | 直接指定账号数据目录；留空按 `<qqntDataDir>\<QQ号>` 拼                     |
+| `loginEnvCacheMs`            | `300000`                          | 环境快照缓存；掉线时会强制重拍，不受缓存影响                               |
+| `loginAlertEnabled`          | `true`                            | 掉线/恢复是否往盘上写一行告警                                              |
+| `loginAlertFile`             | `login-alerts.log`                | 告警文件名（相对数据目录）或绝对路径                                       |
 
 记录存在共享 SQLite 里：每次掉线的**起止时间、原因、不可用时长**，
 会话名是合成的 `system:login`，`deliverable=0`（掉线不是待发送的消息）。
@@ -1944,11 +2291,11 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 当前窗口内的普通成功发言不重复注入，沿用 `memoryInjectOnChange`，无变化时不重发记忆。
 群聊只取本群涉及的经历，避免仅因某个人在群里就把无关私聊带入；当前白名单仍约束检索。
 
-| 配置 | 默认 | 作用 |
-| --- | --- | --- |
+| 配置                    | 默认   | 作用                                                  |
+| ----------------------- | ------ | ----------------------------------------------------- |
 | `episodicMemoryEnabled` | `true` | 事件记忆开关，需同时开启 `memoryEnabled` 和可用持久化 |
-| `episodeInjectLimit` | `4` | 每轮最多事件数（0～10，0 关闭注入） |
-| `episodeInjectMaxChars` | `900` | 事件区块字符上限（0～4000，0 关闭注入） |
+| `episodeInjectLimit`    | `4`    | 每轮最多事件数（0～10，0 关闭注入）                   |
+| `episodeInjectMaxChars` | `900`  | 事件区块字符上限（0～4000，0 关闭注入）               |
 
 状态接口的 `episodicMemory` 可核对实际可用性、记录数与注入预算。这一版从上线后累积，
 不会自动扫描旧会话或补造过去的委托；保存的待办是有来源的经历，尚不自动定时催办或
@@ -2037,17 +2384,17 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 
 ### 配置
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `memoryEnabled` | `true` | 总开关。关掉就退回「全靠 DSH 会话历史」的旧行为 |
-| `memoryDir` | `D:\Code\dsh-qq-bridge\memory` | 记忆文档目录 |
-| `memoryMaxEntries` | `20` | 单文档条数上限，超了自动摘要 |
-| `memoryInjectRecent` | `2` | 群聊时额外注入几个最近参与者的记忆 |
-| `memoryInjectMaxChars` | `1800` | 每轮记忆区块总字符预算；当前说话人优先，0 表示不设总预算 |
-| `conversationMemoryMaxChars` | `450` | 会话「长期约定」面：字符限额；`0` = 整面关闭（不注入也不提炼，存档只读保留）。desktop profile 当前为 0 |
-| `windowTurns` | `10` | 保留最近 Agent 回合对应的消息，同时受双方消息条数上限约束；desktop profile 当前为 12 |
-| `rotateEveryTurns` | `30` | 每多少轮换一个新 Session；desktop profile 当前为 30（2026-10-24 由 45 降到 30，给图片/长文留窗口余量） |
-| `rememberMarker` | `[记住:` | 写记忆的标记前缀 |
+| 字段                         | 默认                           | 说明                                                                                                   |
+| ---------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `memoryEnabled`              | `true`                         | 总开关。关掉就退回「全靠 DSH 会话历史」的旧行为                                                        |
+| `memoryDir`                  | `D:\Code\dsh-qq-bridge\memory` | 记忆文档目录                                                                                           |
+| `memoryMaxEntries`           | `20`                           | 单文档条数上限，超了自动摘要                                                                           |
+| `memoryInjectRecent`         | `2`                            | 群聊时额外注入几个最近参与者的记忆                                                                     |
+| `memoryInjectMaxChars`       | `1800`                         | 每轮记忆区块总字符预算；当前说话人优先，0 表示不设总预算                                               |
+| `conversationMemoryMaxChars` | `450`                          | 会话「长期约定」面：字符限额；`0` = 整面关闭（不注入也不提炼，存档只读保留）。desktop profile 当前为 0 |
+| `windowTurns`                | `10`                           | 保留最近 Agent 回合对应的消息，同时受双方消息条数上限约束；desktop profile 当前为 12                   |
+| `rotateEveryTurns`           | `30`                           | 每多少轮换一个新 Session；desktop profile 当前为 30（2026-10-24 由 45 降到 30，给图片/长文留窗口余量） |
+| `rememberMarker`             | `[记住:`                       | 写记忆的标记前缀                                                                                       |
 
 ## 两个必须知道的坑
 
@@ -2058,39 +2405,39 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 
 在 profile 的 `cordis.patch.yml` 里按条目 id `qq-bridge` 覆盖：
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `path` | `/qq/onebot` | 接收上报的路由路径 |
-| `token` | 空 | 非空则校验 `Authorization: Bearer <token>` |
-| `onebotHttp` | `http://127.0.0.1:3000` | SnowLuma 的 OneBot HTTP 地址 |
-| `onebotToken` | 空 | 与 SnowLuma HTTP server 的 `accessToken` 一致 |
-| `cwd` | 空 | 旧数据目录基准；会话 cwd 由独立工作区管理 |
-| `workspaceRoot` | 空 | 工作区根目录；默认用户目录下 .dsh/qq-workspaces，按群/私聊隔离 |
-| `voiceLibraryRoot` | 空 | 语音库根目录；默认用户目录下 .dsh/qq-voices，也可用环境变量 `QQ_VOICE_LIBRARY`。与工作区**刻意分开**：库文件由 SnowLuma 直接读本机路径，不占会话配额 |
-| `agentPreset` | 空 | 指定 QQ 会话使用的 Agent 预设 |
-| `groups` | `[]` | 群白名单，空=不限制 |
-| `users` | `[]` | 用户白名单，空=不限制 |
-| `groupEnabled` / `privateEnabled` | `true` | 开关 |
-| `groupTrigger` | `at` | `at` 被@才回 / `prefix` 前缀 / `all` 所有消息 |
-| `groupPrefix` | 空 | `groupTrigger=prefix` 时必需 |
-| `selfIds` | `[]` | 机器人 QQ 号；留空则用事件里的 `self_id` |
-| `resolveAtNames` | `true` | 把 @ 渲染成群昵称（要一次 `get_group_member_list`）；关掉只会退化成 `@123456`，@ 本身不会消失 |
-| `groupMemberCacheMs` | `600000` | 群成员昵称缓存时长 |
-| `replyTimeoutMs` | `180000` | 单轮等待上限 |
-| `maxReplyChars` | `1500` | 回复截断长度 |
-| `replyToGroups` | `true` | 是否在群里回 |
-| `atMentionEnabled` | `true` | 让她能自己 @ 人：正文里写 `[@昵称]`（优先）或 `[@:QQ号]` 即转为真的 at 段；关掉只是不发 at，标记照样会被摘干净 |
-| `atMentionMax` | `3` | 一个气泡最多 @ 几个人；超出的标记丢弃（防"一句话 @ 一屏人"）|
-| `replyMaxSendAttempts` | `3` | 一条回复**明确发送失败**最多试几次，到上限转 `failed` 终态并放开该会话队列（可在 `status.replyDelivery.failed` 查）；`0` = 无限重试（旧行为）。结果未知（UNKNOWN）不受此限 |
-| `replyRecoveryTimeoutMs` | `20000` | 恢复尝试的单轮超时。一个早已不存在的 DSH 会话重连注定失败，不该占满 `replyTimeoutMs`(180s) |
-| `bubbleProtocol` | `auto` | 正文怎么切成气泡：`auto` = 有 `『』` 就只发框内，没有框且正文像排稿时只捞最后一轮的引号候选句（捞不到就不发）；`brackets` = 严格只发 `『』`，没框一个都不发；`off` = 旧行为（整段按空行切）。气泡数**不封顶**，`maxBubbles` 已废弃 |
-| `replyRecoveryMaxAgeMs` | `900000` | 超过这个时长仍无 outcome 的"进行中"执行视为不可能恢复，收敛成 `failed` 终态（否则它永久占着 `recovering`，让 task 永久 busy 并卡住 `pump`）。用执行自己的 `times.received` 判定，不用 `updated_at` |
-| `replyStaleDeliveryMaxAgeMs` | `600000` | **迟到投递护栏**：`following`／`output` 这类还没有确认结果的行超龄一律不再恢复投递，直接转 `failed`。**行龄从"最后一次确认这一轮还活着"算起**（`bridge_replies.alive_at`，回合归属行还在时由恢复循环续心跳）：回合还在 DSH 里跑就不判死，`turn/end` 取走归属后才开始倒计时，长回合收尾的正文还能被 `runTurn(resume)` 取回来。迟到的回复比不回复更糟——它答的是一个早已结束的话题（实测曾一次性把 14 条 3–4 天前的旧回复发进真实群）。`planned` 不受影响：它已有确认结果，可能正在合法等发送配额窗口 |
-| `taskSweepIntervalMs` | `60000` | `taskScheduler.tick()` 里 `sweep()` 的节流间隔 |
-| `taskReceiptsIntervalMs` | `15000` | `tick()` 里 `refreshReceipts()` 的节流间隔 |
-| `routeSteerableWindowMs` | `600000` | 终态任务在多长时间内仍算"可被 steer"（保住"继续刚做完的那个"）。**它决定要不要为一条消息调路由模型**：实测 375 条非归档任务里只有 1 条可被 steer，所以绝大部分消息本来就不该付这 2.5 秒。设 `0` = 只有真有活干时才调 |
-| `taskRouteTimeoutMs` | `4000` | 一次语义路由（分类 JSON）的超时。**只管分类，不再兼职回复生成** |
-| `inTurnInjectionMode` | `amend` | 执行中收到的 QQ 新消息怎么处理：`amend` = 只有路由判成"原作者改需求"才注入正在跑的那一轮；`all` = **只要有在跑的回合就注入**，不调路由模型（省掉上面那 4 秒）、不新建任务。取消仍走原通路（进度问句现在也并进这一轮，见「强制注入」一节） |
+| 字段                              | 默认                    | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`                            | `/qq/onebot`            | 接收上报的路由路径                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `token`                           | 空                      | 非空则校验 `Authorization: Bearer <token>`                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `onebotHttp`                      | `http://127.0.0.1:3000` | SnowLuma 的 OneBot HTTP 地址                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `onebotToken`                     | 空                      | 与 SnowLuma HTTP server 的 `accessToken` 一致                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `cwd`                             | 空                      | 旧数据目录基准；会话 cwd 由独立工作区管理                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `workspaceRoot`                   | 空                      | 工作区根目录；默认用户目录下 .dsh/qq-workspaces，按群/私聊隔离                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `voiceLibraryRoot`                | 空                      | 语音库根目录；默认用户目录下 .dsh/qq-voices，也可用环境变量 `QQ_VOICE_LIBRARY`。与工作区**刻意分开**：库文件由 SnowLuma 直接读本机路径，不占会话配额                                                                                                                                                                                                                                                                                                                                               |
+| `agentPreset`                     | 空                      | 指定 QQ 会话使用的 Agent 预设                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `groups`                          | `[]`                    | 群白名单，空=不限制                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `users`                           | `[]`                    | 用户白名单，空=不限制                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `groupEnabled` / `privateEnabled` | `true`                  | 开关                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `groupTrigger`                    | `at`                    | `at` 被@才回 / `prefix` 前缀 / `all` 所有消息                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `groupPrefix`                     | 空                      | `groupTrigger=prefix` 时必需                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `selfIds`                         | `[]`                    | 机器人 QQ 号；留空则用事件里的 `self_id`                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `resolveAtNames`                  | `true`                  | 把 @ 渲染成群昵称（要一次 `get_group_member_list`）；关掉只会退化成 `@123456`，@ 本身不会消失                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `groupMemberCacheMs`              | `600000`                | 群成员昵称缓存时长                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `replyTimeoutMs`                  | `180000`                | 单轮等待上限                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `maxReplyChars`                   | `1500`                  | 回复截断长度                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `replyToGroups`                   | `true`                  | 是否在群里回                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `atMentionEnabled`                | `true`                  | 让她能自己 @ 人：正文里写 `[@昵称]`（优先）或 `[@:QQ号]` 即转为真的 at 段；关掉只是不发 at，标记照样会被摘干净                                                                                                                                                                                                                                                                                                                                                                                     |
+| `atMentionMax`                    | `3`                     | 一个气泡最多 @ 几个人；超出的标记丢弃（防"一句话 @ 一屏人"）                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `replyMaxSendAttempts`            | `3`                     | 一条回复**明确发送失败**最多试几次，到上限转 `failed` 终态并放开该会话队列（可在 `status.replyDelivery.failed` 查）；`0` = 无限重试（旧行为）。结果未知（UNKNOWN）不受此限                                                                                                                                                                                                                                                                                                                         |
+| `replyRecoveryTimeoutMs`          | `20000`                 | 恢复尝试的单轮超时。一个早已不存在的 DSH 会话重连注定失败，不该占满 `replyTimeoutMs`(180s)                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `bubbleProtocol`                  | `auto`                  | 正文怎么切成气泡：`auto` = 有 `『』` 就只发框内，没有框且正文像排稿时只捞最后一轮的引号候选句（捞不到就不发）；`brackets` = 严格只发 `『』`，没框一个都不发；`off` = 旧行为（整段按空行切）。气泡数**不封顶**，`maxBubbles` 已废弃                                                                                                                                                                                                                                                                 |
+| `replyRecoveryMaxAgeMs`           | `900000`                | 超过这个时长仍无 outcome 的"进行中"执行视为不可能恢复，收敛成 `failed` 终态（否则它永久占着 `recovering`，让 task 永久 busy 并卡住 `pump`）。用执行自己的 `times.received` 判定，不用 `updated_at`                                                                                                                                                                                                                                                                                                 |
+| `replyStaleDeliveryMaxAgeMs`      | `600000`                | **迟到投递护栏**：`following`／`output` 这类还没有确认结果的行超龄一律不再恢复投递，直接转 `failed`。**行龄从"最后一次确认这一轮还活着"算起**（`bridge_replies.alive_at`，回合归属行还在时由恢复循环续心跳）：回合还在 DSH 里跑就不判死，`turn/end` 取走归属后才开始倒计时，长回合收尾的正文还能被 `runTurn(resume)` 取回来。迟到的回复比不回复更糟——它答的是一个早已结束的话题（实测曾一次性把 14 条 3–4 天前的旧回复发进真实群）。`planned` 不受影响：它已有确认结果，可能正在合法等发送配额窗口 |
+| `taskSweepIntervalMs`             | `60000`                 | `taskScheduler.tick()` 里 `sweep()` 的节流间隔                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `taskReceiptsIntervalMs`          | `15000`                 | `tick()` 里 `refreshReceipts()` 的节流间隔                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `routeSteerableWindowMs`          | `600000`                | 终态任务在多长时间内仍算"可被 steer"（保住"继续刚做完的那个"）。**它决定要不要为一条消息调路由模型**：实测 375 条非归档任务里只有 1 条可被 steer，所以绝大部分消息本来就不该付这 2.5 秒。设 `0` = 只有真有活干时才调                                                                                                                                                                                                                                                                               |
+| `taskRouteTimeoutMs`              | `4000`                  | 一次语义路由（分类 JSON）的超时。**只管分类，不再兼职回复生成**                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `inTurnInjectionMode`             | `amend`                 | 执行中收到的 QQ 新消息怎么处理：`amend` = 只有路由判成"原作者改需求"才注入正在跑的那一轮；`all` = **只要有在跑的回合就注入**，不调路由模型（省掉上面那 4 秒）、不新建任务。取消仍走原通路（进度问句现在也并进这一轮，见「强制注入」一节）                                                                                                                                                                                                                                                          |
 
 ### 上下文来源与条数
 
@@ -2099,22 +2446,22 @@ token 成本控制：这层不增加独立模型请求；重要经历和明确�
 每个气泡/表情发送成功立即记录时间，重载用原发送时间或数据库事件时间恢复；
 旧窗口中被重载时刻污染的时间自动修正，下一轮 QQ 回读继续校准。
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `contextFromQQHistory` | `true` | **用 QQ 历史直读刷新窗口**（见 §8）|
-| `contextHistoryCount` | `25` | 回读多少条；desktop profile 当前为 40（要够填满 16+8 的窗口） |
-| `contextHistoryCacheMs` | `20000` | 回读结果缓存多久（0 = 每轮都拉）|
-| `contextHistoryTimeoutMs` | `3000` | 回读最多等多久；超时退回内存窗口，不把整轮拖死 |
-| `contextOthersMessages` | `10` | 注入几条**别人的**消息；desktop profile 当前为 16（2026-10-21 由 10 提高） |
-| `contextOwnMessages` | `15` | 注入几条**自己的**回复；desktop profile 当前为 8（保持别人:自己 = 2:1） |
-| `contextImagesOnRequest` | `2` | 对方明确要求看图时首轮最多自动附几张旧图；其余可用 `qq_read_image` 补读 |
-| `windowTurns` | `10` | 保留最近 Agent 回合对应的消息，同时受双方消息条数上限约束；desktop profile 当前为 12（2026-10-21 由 6 提高） |
-| `rotateEveryTurns` | `30` | 每多少轮换一个新 Session；desktop profile 当前为 30（2026-10-24 由 45 降到 30，给图片/长文留窗口余量） |
-| `injectStaticOnce` | `true` | 人设/规则只在本窗口第一轮注入 |
-| `injectWindowOnce` | `true` | Session 首轮完整窗口，后续按消息增量；false = 每轮完整窗口 |
-| `memoryInjectOnChange` | `true` | 当前 Session 按人物/约定/经历分别去重；首次或版本变化时注入相应块 |
-| `rotateAfterImage` | `false` | 显式打开后，附图会导致下一轮提前创建 Session |
-| `toneAnchor` | 空 | 每轮末尾补的一句短语气锚（默认空，语气只由 `persona.md` 决定）|
+| 字段                      | 默认    | 说明                                                                                                         |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `contextFromQQHistory`    | `true`  | **用 QQ 历史直读刷新窗口**（见 §8）                                                                          |
+| `contextHistoryCount`     | `25`    | 回读多少条；desktop profile 当前为 40（要够填满 16+8 的窗口）                                                |
+| `contextHistoryCacheMs`   | `20000` | 回读结果缓存多久（0 = 每轮都拉）                                                                             |
+| `contextHistoryTimeoutMs` | `3000`  | 回读最多等多久；超时退回内存窗口，不把整轮拖死                                                               |
+| `contextOthersMessages`   | `10`    | 注入几条**别人的**消息；desktop profile 当前为 16（2026-10-21 由 10 提高）                                   |
+| `contextOwnMessages`      | `15`    | 注入几条**自己的**回复；desktop profile 当前为 8（保持别人:自己 = 2:1）                                      |
+| `contextImagesOnRequest`  | `2`     | 对方明确要求看图时首轮最多自动附几张旧图；其余可用 `qq_read_image` 补读                                      |
+| `windowTurns`             | `10`    | 保留最近 Agent 回合对应的消息，同时受双方消息条数上限约束；desktop profile 当前为 12（2026-10-21 由 6 提高） |
+| `rotateEveryTurns`        | `30`    | 每多少轮换一个新 Session；desktop profile 当前为 30（2026-10-24 由 45 降到 30，给图片/长文留窗口余量）       |
+| `injectStaticOnce`        | `true`  | 人设/规则只在本窗口第一轮注入                                                                                |
+| `injectWindowOnce`        | `true`  | Session 首轮完整窗口，后续按消息增量；false = 每轮完整窗口                                                   |
+| `memoryInjectOnChange`    | `true`  | 当前 Session 按人物/约定/经历分别去重；首次或版本变化时注入相应块                                            |
+| `rotateAfterImage`        | `false` | 显式打开后，附图会导致下一轮提前创建 Session                                                                 |
+| `toneAnchor`              | 空      | 每轮末尾补的一句短语气锚（默认空，语气只由 `persona.md` 决定）                                               |
 
 desktop profile 把 `stickerCatalogLimit` 设为 `12`（源码默认也是 12）：每轮动态注入时，
 从真实目录无放回随机抽 12 条，放在当前消息前；目录不足 12 条时展示全部，每轮独立抽样允许跨轮重复，更大目录按工具查询。QQ 托管使用 `qq-hosted` 的
@@ -2169,15 +2516,15 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 
 每个群独立累计背景未读消息，达到 `heartbeatUnreadThreshold`（默认 6）立即调用一次轻量判断；不足 6 条但有未读，`heartbeatCooldownMs` 等待周期到期也判断。两条件为 OR，数量触发能替换已有时间定时器。每批最多 6 条，判断拒绝也标为已读并重新计数，判断期间新增未读保留到下一批。判断失败保留本批并遵守独立重试间隔。`heartbeatIdleMs` 仅为旧配置兼容，数量触发不等待静默。
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `heartbeatEnabled` | `false` | 总开关 |
-| `heartbeatUnreadThreshold` | `6` | 各群未读达到此条数立即判断 |
-| `heartbeatMs` | `300000` | **兜底恢复扫描**间隔；不再兼职失败退避（失败走 30s→5m 指数阶梯，见下文） |
-| `heartbeatIdleMs` | `60000` | 旧配置兼容；数量触发不等待静默 |
-| `heartbeatCooldownMs` | `180000` | 不足 6 条时的等待周期；0 关闭时间触发 |
-| `heartbeatBufferSize` | `20` | 缓冲上限，超了挤掉最旧的并**记入缺口** |
-| `heartbeatProvider` / `heartbeatModel` | 空 | 留空则用辅助模型（`auxProvider`/`auxModel`），再留空用主对话模型 |
+| 字段                                   | 默认     | 说明                                                                     |
+| -------------------------------------- | -------- | ------------------------------------------------------------------------ |
+| `heartbeatEnabled`                     | `false`  | 总开关                                                                   |
+| `heartbeatUnreadThreshold`             | `6`      | 各群未读达到此条数立即判断                                               |
+| `heartbeatMs`                          | `300000` | **兜底恢复扫描**间隔；不再兼职失败退避（失败走 30s→5m 指数阶梯，见下文） |
+| `heartbeatIdleMs`                      | `60000`  | 旧配置兼容；数量触发不等待静默                                           |
+| `heartbeatCooldownMs`                  | `180000` | 不足 6 条时的等待周期；0 关闭时间触发                                    |
+| `heartbeatBufferSize`                  | `20`     | 缓冲上限，超了挤掉最旧的并**记入缺口**                                   |
+| `heartbeatProvider` / `heartbeatModel` | 空       | 留空则用辅助模型（`auxProvider`/`auxModel`），再留空用主对话模型         |
 
 ### 辅助判断调用的模型
 
@@ -2186,12 +2533,12 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 首字节 5331ms、思考 1157 字、**正文 0 字**、`finish_reason: length`，于是既撞超时又产出截断 JSON。
 换成本表中不思考的快模型后实测首字节 2125ms、2.5 秒返回合法 JSON。
 
-| 键 | 默认值 | 说明 |
-|---|---|---|
-| `auxProvider` / `auxModel` | 空 | 辅助判断调用用的模型；留空 = 沿用 `llmProvider`/`llmModel`。desktop profile 为 `a6api` / `deepseek-v4.1-flash`（2026-10-19 用户要求从 `deepseek-v4-flash` 改回主模型，已知风险见 profile 注释） |
-| `auxReasoningEffort` | `off` | 这类调用显式声明的思考档位；留空 = 不干预。与换模型是两道独立闸 |
-| `heartbeatProvider` / `heartbeatModel` | 空 | 更具体的专用键，**优先于** `aux*` |
-| `memoryProvider` / `memoryModel` | 空 | 同上，作用于记忆提炼 |
+| 键                                     | 默认值 | 说明                                                                                                                                                                                            |
+| -------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auxProvider` / `auxModel`             | 空     | 辅助判断调用用的模型；留空 = 沿用 `llmProvider`/`llmModel`。desktop profile 为 `a6api` / `deepseek-v4.1-flash`（2026-10-19 用户要求从 `deepseek-v4-flash` 改回主模型，已知风险见 profile 注释） |
+| `auxReasoningEffort`                   | `off`  | 这类调用显式声明的思考档位；留空 = 不干预。与换模型是两道独立闸                                                                                                                                 |
+| `heartbeatProvider` / `heartbeatModel` | 空     | 更具体的专用键，**优先于** `aux*`                                                                                                                                                               |
+| `memoryProvider` / `memoryModel`       | 空     | 同上，作用于记忆提炼                                                                                                                                                                            |
 
 优先级：专用键（`heartbeat*` / `memory*`）> `auxProvider`/`auxModel` > `llmProvider`/`llmModel` > 全局默认。
 实际解析结果可在 `status.models` 直接看到（`main` / `aux` / `heartbeatOverride` / `memoryOverride`）。
@@ -2205,27 +2552,27 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 `status.auxHealth` 与 `#debug status` 的【辅助判断层】段给出**内存环形缓冲**（最近 240 次 / 最近 15 分钟）
 里的成功/失败/**空输出**计数与成功率，按调用点分组：
 
-| 调用点 | label | 说明 |
-|---|---|---|
-| 心跳判断 | `heartbeat` | 主动插话 |
-| 语义路由 | `routing` | 任务归属分类 |
-| 记忆提炼 | `memory` | 后台记忆补充 |
-| 参与决策 | `reply-decision` | 该不该回一句 |
-| 楼层复核 | `floor` | 生成后的交付价值复核 |
+| 调用点   | label            | 说明                 |
+| -------- | ---------------- | -------------------- |
+| 心跳判断 | `heartbeat`      | 主动插话             |
+| 语义路由 | `routing`        | 任务归属分类         |
+| 记忆提炼 | `memory`         | 后台记忆补充         |
+| 参与决策 | `reply-decision` | 该不该回一句         |
+| 楼层复核 | `floor`          | 生成后的交付价值复核 |
 
 它**不写库**：重载后从零累计，只为看清"现在到底还活着没有"。成功率低于 80%（且样本 ≥ 3）时
 `#debug status` 顶部会有一行 `⚠️ 辅助判断层降级中：… —— …正在走 fallback`。
 
 失败原因用共享归因（`lib/agent/aux-attribution.mjs`）统一分类，**"模型什么都没返回"不再被记成坏 JSON**：
 
-| cause | 含义 | 该查什么 |
-|---|---|---|
-| `empty-output` | 正文 0 字（可能只收到结束帧） | 预算、思考档位、供应商是否接受该模型名/参数 |
-| `timeout` | 撞 `taskRouteTimeoutMs` / 各自超时 | 首字节时间、中转 |
-| `invalid-json` | 有正文但 JSON 坏了 | 提示词、校验 |
-| `invalid-verdict` | JSON 合法但裁决不合法 | `validate()` 规则 |
-| `stream-error` | 流本身抛错 | 网络/供应商 |
-| `unavailable` | 没有 llm 服务或没选定 provider/model | 配置 |
+| cause             | 含义                                 | 该查什么                                    |
+| ----------------- | ------------------------------------ | ------------------------------------------- |
+| `empty-output`    | 正文 0 字（可能只收到结束帧）        | 预算、思考档位、供应商是否接受该模型名/参数 |
+| `timeout`         | 撞 `taskRouteTimeoutMs` / 各自超时   | 首字节时间、中转                            |
+| `invalid-json`    | 有正文但 JSON 坏了                   | 提示词、校验                                |
+| `invalid-verdict` | JSON 合法但裁决不合法                | `validate()` 规则                           |
+| `stream-error`    | 流本身抛错                           | 网络/供应商                                 |
+| `unavailable`     | 没有 llm 服务或没选定 provider/model | 配置                                        |
 
 `empty-output` 的 detail 固定写成
 `收到 0 段正文 / reasoning N 段 / 用时 Xms（正文 …, 思考 …, 分片 …, finishReason=…, 末分片 …）`，
@@ -2260,14 +2607,13 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 
 ### 失败退避：不再无限重试，也不再一失败锁十分钟
 
-| 调用点 | 旧行为 | 现在 |
-|---|---|---|
-| 心跳判断 | 一次失败锁 `heartbeatMs`（10 分钟） | 按会话 30s → 1m → 2m → 5m（封顶）；未读一条不丢，只推迟；正常判定后清零 |
+| 调用点   | 旧行为                                                                | 现在                                                                                          |
+| -------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 心跳判断 | 一次失败锁 `heartbeatMs`（10 分钟）                                   | 按会话 30s → 1m → 2m → 5m（封顶）；未读一条不丢，只推迟；正常判定后清零                       |
 | 记忆提炼 | 失败只计数，30 秒后重试同一批，永不放弃（线上 406 次失败 / 0 次成功） | 按会话 30s → 1m → 2m → 5m；单批连续失败 5 次**丢弃该批**并记 `memoryBatchAbandoned`；成功清零 |
 
 两者的失败次数与到期时间都写进 `store.setState` 的会话/批次状态，热重载后不会回到"立刻重试"。
 `status.auxBackoff` 直接显示当前阶梯与丢弃上限。
-
 
 ### 参与决策：像真人那样，不是每条都回
 
@@ -2280,11 +2626,11 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 所以"几个人接着聊同一件事"只回一次。判成沉默就走 `observeWithoutReply`：消息进缓冲与窗口
 （上下文不丢），并交给心跳决定要不要稍后接话。
 
-| 键 | 默认值 | 说明 |
-|---|---|---|
-| `replyDecisionEnabled` | `false` | 打开后 @ 消息不再"必回"。desktop profile 为 `true` |
-| `replyDecisionTimeoutMs` | `5000` | 单次决策超时；超时即 fail-open（照常回） |
-| `replyDecisionLongAskChars` | `12` | 长于这个字数且带提问标记的消息直接回，不必先问决策模型（省掉那约 2.5 秒）。决策的价值集中在短而含糊的消息上 |
+| 键                          | 默认值  | 说明                                                                                                        |
+| --------------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `replyDecisionEnabled`      | `false` | 打开后 @ 消息不再"必回"。desktop profile 为 `true`                                                          |
+| `replyDecisionTimeoutMs`    | `5000`  | 单次决策超时；超时即 fail-open（照常回）                                                                    |
+| `replyDecisionLongAskChars` | `12`    | 长于这个字数且带提问标记的消息直接回，不必先问决策模型（省掉那约 2.5 秒）。决策的价值集中在短而含糊的消息上 |
 
 三道安全设计（都很重要，因为这个功能会**静默丢消息**）：
 
@@ -2310,12 +2656,12 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 
 路由给出的 `amend` 表示"原请求作者在执行中修改要求"。处理分两条路径，都由 `status.tasks.interjection.amend` 计数：
 
-| 字段 | 含义 |
-|---|---|
-| `routed` | 裁决为 `amend` 的条数 |
-| `injected` | 成功注入**正在跑的那一轮**（用户拿到一次连贯答复） |
-| `queued` | 落到**持久化修订**：不新建任务，在同一任务上排队一个新执行，并 supersede 尚未提交的旧排队执行 |
-| `injectionFailed` | 已认领输入但注入未确认 → 任务转 `needs_attention`，需核对 DSH inbox |
+| 字段              | 含义                                                                                          |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `routed`          | 裁决为 `amend` 的条数                                                                         |
+| `injected`        | 成功注入**正在跑的那一轮**（用户拿到一次连贯答复）                                            |
+| `queued`          | 落到**持久化修订**：不新建任务，在同一任务上排队一个新执行，并 supersede 尚未提交的旧排队执行 |
+| `injectionFailed` | 已认领输入但注入未确认 → 任务转 `needs_attention`，需核对 DSH inbox                           |
 
 注入只是优化（需要真的有一个在跑的回合、且宿主 agent 可注入）；**持久化修订才是保底**，它不依赖运行时时机。
 过期草稿由投递前的 `recheckFloor` 复核丢弃或更新。**2026-10-16**：`amend` 此前线上产出为 0/504，
@@ -2334,12 +2680,12 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 `all` 把这件事改成确定的：`TaskScheduler.admit()` 在**调语义路由之前**先试强制注入，
 只要同会话有一个真的还在跑的回合，就把这一批消息写进它的 next-step：
 
-| 条件 | 为什么 |
-|---|---|
-| 执行 `state === 'following'` | 这一轮已经拿到 DSH turn 号，还没结束 |
-| reply journal 仍在 `active` | 桥接仍拥有这一轮的投递权，草稿丢弃是安全的 |
-| 宿主 agent `status === 'running'` 且有 `inject` | `inject` = `send(input,'next-step',false)`，**不唤醒**；空闲时调用只会让这条消息压到下一轮、甚至一直留在 inbox，比排队更糟 |
-| 不接管 `isCancellation()` / `isProgressQuestion()` | 取消必须真的置 `cancelled`；进度问句要立刻回一句，不能被并进几分钟后的最终答复 |
+| 条件                                               | 为什么                                                                                                                     |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 执行 `state === 'following'`                       | 这一轮已经拿到 DSH turn 号，还没结束                                                                                       |
+| reply journal 仍在 `active`                        | 桥接仍拥有这一轮的投递权，草稿丢弃是安全的                                                                                 |
+| 宿主 agent `status === 'running'` 且有 `inject`    | `inject` = `send(input,'next-step',false)`，**不唤醒**；空闲时调用只会让这条消息压到下一轮、甚至一直留在 inbox，比排队更糟 |
+| 不接管 `isCancellation()` / `isProgressQuestion()` | 取消必须真的置 `cancelled`；进度问句要立刻回一句，不能被并进几分钟后的最终答复                                             |
 
 顺序是先事务认领 `bridge_input_routes`、再改执行与窗口、最后 `agent.inject`；注入结果
 不确定时任务转 `needs_attention`，**绝不自动重发**。注入后旧的未投递草稿由 runner 丢弃，
@@ -2361,16 +2707,16 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 
 只读探测 QQ 登录状态，把"被踢下线"变成自检接口上的读数。**不自动重登**。
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `loginWatchEnabled` | `true` | 总开关；只读 `get_status` / `get_login_info`，不改账号、不发消息 |
-| `loginWatchMs` | `60000` | 探测间隔 |
-| `loginWatchFailureThreshold` | `3` | 连续失败几次才记一次掉线；OneBot 明确回 `offline` 时立即记 |
-| `loginWatchTimeoutMs` | `4000` | 单次探测超时（上限为间隔的一半） |
-| `loginWatchHistoryLimit` | `10` | 自检里回显最近几次掉线；`0` = 全部 |
-| `qqntDir` / `qqntDataDir` | 见上 | 环境快照要读的 QQNT 版本与票据位置 |
-| `loginEnvCacheMs` | `300000` | 环境快照缓存；掉线时强制重拍 |
-| `loginAlertEnabled` / `loginAlertFile` | `true` / `login-alerts.log` | 落盘告警 |
+| 字段                                   | 默认                        | 说明                                                             |
+| -------------------------------------- | --------------------------- | ---------------------------------------------------------------- |
+| `loginWatchEnabled`                    | `true`                      | 总开关；只读 `get_status` / `get_login_info`，不改账号、不发消息 |
+| `loginWatchMs`                         | `60000`                     | 探测间隔                                                         |
+| `loginWatchFailureThreshold`           | `3`                         | 连续失败几次才记一次掉线；OneBot 明确回 `offline` 时立即记       |
+| `loginWatchTimeoutMs`                  | `4000`                      | 单次探测超时（上限为间隔的一半）                                 |
+| `loginWatchHistoryLimit`               | `10`                        | 自检里回显最近几次掉线；`0` = 全部                               |
+| `qqntDir` / `qqntDataDir`              | 见上                        | 环境快照要读的 QQNT 版本与票据位置                               |
+| `loginEnvCacheMs`                      | `300000`                    | 环境快照缓存；掉线时强制重拍                                     |
+| `loginAlertEnabled` / `loginAlertFile` | `true` / `login-alerts.log` | 落盘告警                                                         |
 
 默认开是因为它没有任何副作用，而掉线在别处**看不出来**：消息一停，
 "被踢了"和"插件坏了"表现完全一样。
@@ -2381,59 +2727,59 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 
 ### 戳一戳
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `pokeReplyEnabled` | `false` | 总开关（第一道闸门）|
-| `pokeReplyMode` | `'wake'` | `wake` 回戳+开窗口（默认）/ `text` 回固定文案 / `agent` 唤醒完整回合 |
-| `pokeReplyMinIntervalMs` | `10000` | wake / text 全局最小间隔 |
-| `pokeReplyPerSenderPerHour` | `5` | wake / text 每人每小时上限（落盘）|
-| `pokeReplyGroups` | `[]` | 额外收紧：只有这些群回戳 |
-| `pokeReplyGroupText` | `true` | `text` 模式群里是否也发一句 |
-| `pokeAgentMinIntervalMs` | `30000` | `agent` 模式全局最小间隔 |
-| `pokeAgentPerSenderPerHour` | `6` | `agent` 模式每人每小时上限（落盘）|
-| `pokeAgentSendPoke` | `true` | `agent` 模式先自动回戳 |
-| `pokeAgentGroupText` | `true` | `agent` 模式群里是否也回话 |
+| 字段                        | 默认     | 说明                                                                 |
+| --------------------------- | -------- | -------------------------------------------------------------------- |
+| `pokeReplyEnabled`          | `false`  | 总开关（第一道闸门）                                                 |
+| `pokeReplyMode`             | `'wake'` | `wake` 回戳+开窗口（默认）/ `text` 回固定文案 / `agent` 唤醒完整回合 |
+| `pokeReplyMinIntervalMs`    | `10000`  | wake / text 全局最小间隔                                             |
+| `pokeReplyPerSenderPerHour` | `5`      | wake / text 每人每小时上限（落盘）                                   |
+| `pokeReplyGroups`           | `[]`     | 额外收紧：只有这些群回戳                                             |
+| `pokeReplyGroupText`        | `true`   | `text` 模式群里是否也发一句                                          |
+| `pokeAgentMinIntervalMs`    | `30000`  | `agent` 模式全局最小间隔                                             |
+| `pokeAgentPerSenderPerHour` | `6`      | `agent` 模式每人每小时上限（落盘）                                   |
+| `pokeAgentSendPoke`         | `true`   | `agent` 模式先自动回戳                                               |
+| `pokeAgentGroupText`        | `true`   | `agent` 模式群里是否也回话                                           |
 
 ### 记忆与申请
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `memoryEnabled` | `true` | 长期记忆总开关 |
-| `memoryAutoExtract` | `true` | 从已准入原文独立提炼；false 沿用回复标记 |
-| `memoryExtractBatchSize` | `6` | 触发批次所需消息数（1～40） |
-| `memoryExtractIntervalMs` | `30000` | 同一会话两次提炼至少间隔多久 |
-| `memoryExtractTimeoutMs` | `15000` | 单批次提炼超时 |
-| `memoryProvider` / `memoryModel` | 空 | 记忆模型覆盖；都填写才生效 |
-| `memoryDir` | 空 | 记忆文档目录；留空 = `<stateDir>/memory`（profile 里显式配成 `D:\Code\dsh-qq-bridge\memory`）|
-| `memoryMaxEntries` | `20` | 单文档条数上限，超了自动摘要 |
-| `memoryInjectRecent` | `2` | 群聊时额外注入几个最近参与者的记忆 |
-| `conversationMemoryMaxChars` | `450` | 会话「长期约定」面：字符限额；`0` = 整面关闭（不注入也不提炼，存档保留）|
-| `memoryReflectEnabled` | `true` | L4 反思：从已有事实归纳可验证的规律，写进 `memory/<qq>.md` 的 `## 规律`（不新增注入）|
-| `memoryReflectIntervalMs` | `86400000` | 同一个人两次反思的最小间隔；上次运行时间落库，重载不重置 |
-| `memoryReflectMinFacts` | `8` | 少于这么多条 active facts 不反思 |
-| `memoryReflectTopFacts` | `30` | 一次最多喂多少条事实（按 置信度×衰减×log(印证) 取前 N）|
-| `memoryReflectTickMs` | `600000` | 扫描"谁该反思了"的周期 |
-| `memoryReflectMaxPerRun` | `1` | 每次扫描最多反思几个人 |
-| `memoryReflectTimeoutMs` | `30000` | 单次反思超时；失败不影响聊天，24 小时内不重试 |
-| `memoryReflectProvider` / `memoryReflectModel` | 空 | 反思模型覆盖；都填写才生效 |
-| `rememberMarker` | `[记住:` | 写记忆的标记前缀 |
-| `notifyUsers` | `[]` | 申请转发给哪些 QQ 号（只走私聊）|
-| `autoHandleRequests` | `false` | 是否自动同意申请 |
-| `autoHandleRequestAction` | `'reject'` | 自动处理时同意还是拒绝（**默认拒绝**）|
-| `debugUsers` | `[]` | 允许用 `#debug` 的 QQ 号 |
-| `debugPrefix` | `#debug` | 调试命令前缀 |
+| 字段                                           | 默认       | 说明                                                                                          |
+| ---------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------- |
+| `memoryEnabled`                                | `true`     | 长期记忆总开关                                                                                |
+| `memoryAutoExtract`                            | `true`     | 从已准入原文独立提炼；false 沿用回复标记                                                      |
+| `memoryExtractBatchSize`                       | `6`        | 触发批次所需消息数（1～40）                                                                   |
+| `memoryExtractIntervalMs`                      | `30000`    | 同一会话两次提炼至少间隔多久                                                                  |
+| `memoryExtractTimeoutMs`                       | `15000`    | 单批次提炼超时                                                                                |
+| `memoryProvider` / `memoryModel`               | 空         | 记忆模型覆盖；都填写才生效                                                                    |
+| `memoryDir`                                    | 空         | 记忆文档目录；留空 = `<stateDir>/memory`（profile 里显式配成 `D:\Code\dsh-qq-bridge\memory`） |
+| `memoryMaxEntries`                             | `20`       | 单文档条数上限，超了自动摘要                                                                  |
+| `memoryInjectRecent`                           | `2`        | 群聊时额外注入几个最近参与者的记忆                                                            |
+| `conversationMemoryMaxChars`                   | `450`      | 会话「长期约定」面：字符限额；`0` = 整面关闭（不注入也不提炼，存档保留）                      |
+| `memoryReflectEnabled`                         | `true`     | L4 反思：从已有事实归纳可验证的规律，写进 `memory/<qq>.md` 的 `## 规律`（不新增注入）         |
+| `memoryReflectIntervalMs`                      | `86400000` | 同一个人两次反思的最小间隔；上次运行时间落库，重载不重置                                      |
+| `memoryReflectMinFacts`                        | `8`        | 少于这么多条 active facts 不反思                                                              |
+| `memoryReflectTopFacts`                        | `30`       | 一次最多喂多少条事实（按 置信度×衰减×log(印证) 取前 N）                                       |
+| `memoryReflectTickMs`                          | `600000`   | 扫描"谁该反思了"的周期                                                                        |
+| `memoryReflectMaxPerRun`                       | `1`        | 每次扫描最多反思几个人                                                                        |
+| `memoryReflectTimeoutMs`                       | `30000`    | 单次反思超时；失败不影响聊天，24 小时内不重试                                                 |
+| `memoryReflectProvider` / `memoryReflectModel` | 空         | 反思模型覆盖；都填写才生效                                                                    |
+| `rememberMarker`                               | `[记住:`   | 写记忆的标记前缀                                                                              |
+| `notifyUsers`                                  | `[]`       | 申请转发给哪些 QQ 号（只走私聊）                                                              |
+| `autoHandleRequests`                           | `false`    | 是否自动同意申请                                                                              |
+| `autoHandleRequestAction`                      | `'reject'` | 自动处理时同意还是拒绝（**默认拒绝**）                                                        |
+| `debugUsers`                                   | `[]`       | 允许用 `#debug` 的 QQ 号                                                                      |
+| `debugPrefix`                                  | `#debug`   | 调试命令前缀                                                                                  |
 
 ### 可靠性
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `persistenceEnabled` | `true` | 是否启用 SQLite 持久化 |
-| `stateDir` | 空 | 数据库目录；留空用 `cwd/data` |
-| `restoreBufferOnLoad` | `true` | 重载后回灌未处理的缓冲 |
-| `dedupeIncoming` | `true` | 按 `message_id` 入站去重 |
-| `eventsKeepPerConversation` | `1000` | 事件缓存每会话上限 |
-| `sendQuotaPerHour` | `600` | 每会话每小时发送上限，0 = 不限 |
-| `sendQuotaPerMinute` | `20` | 每会话每分钟上限 |
+| 字段                        | 默认   | 说明                           |
+| --------------------------- | ------ | ------------------------------ |
+| `persistenceEnabled`        | `true` | 是否启用 SQLite 持久化         |
+| `stateDir`                  | 空     | 数据库目录；留空用 `cwd/data`  |
+| `restoreBufferOnLoad`       | `true` | 重载后回灌未处理的缓冲         |
+| `dedupeIncoming`            | `true` | 按 `message_id` 入站去重       |
+| `eventsKeepPerConversation` | `1000` | 事件缓存每会话上限             |
+| `sendQuotaPerHour`          | `600`  | 每会话每小时发送上限，0 = 不限 |
+| `sendQuotaPerMinute`        | `20`   | 每会话每分钟上限               |
 
 ## 图片
 
@@ -2453,16 +2799,16 @@ DSH base 已挂载自动 compaction，但默认按模型上下文窗口的压力
 
 相关配置：
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `imagesEnabled` | `true` | 关掉就永远只传文本 |
-| `imageMode` | `lazy` | 当前普通图/正文带图直接附上；群聊纯表情按请求；`always` 全读，`never` 不附图 |
-| `readImagesInPrivate` | `true` | 私聊纯表情也读取 |
-| `attachQuotedImages` | `true` | 引用中的图片默认读取 |
-| `attachQuotedForwards` | `true` | 引用中的合并转发默认读取，和引用图片保持一致 |
-| `contextForwardsOnRequest` | `1` | 明确要求查看上文时最多补读几条历史合并转发 |
-| `contextImagesOnRequest` | `2` | 无当前/引用图片的读图请求首轮最多自动补几张历史图；desktop 为 1，0 只关闭自动补图，仍可用 `qq_read_image` |
-| `maxImageBytes` | `4194304` | 单张图上限，超了跳过并记日志 |
+| 字段                       | 默认      | 说明                                                                                                      |
+| -------------------------- | --------- | --------------------------------------------------------------------------------------------------------- |
+| `imagesEnabled`            | `true`    | 关掉就永远只传文本                                                                                        |
+| `imageMode`                | `lazy`    | 当前普通图/正文带图直接附上；群聊纯表情按请求；`always` 全读，`never` 不附图                              |
+| `readImagesInPrivate`      | `true`    | 私聊纯表情也读取                                                                                          |
+| `attachQuotedImages`       | `true`    | 引用中的图片默认读取                                                                                      |
+| `attachQuotedForwards`     | `true`    | 引用中的合并转发默认读取，和引用图片保持一致                                                              |
+| `contextForwardsOnRequest` | `1`       | 明确要求查看上文时最多补读几条历史合并转发                                                                |
+| `contextImagesOnRequest`   | `2`       | 无当前/引用图片的读图请求首轮最多自动补几张历史图；desktop 为 1，0 只关闭自动补图，仍可用 `qq_read_image` |
+| `maxImageBytes`            | `4194304` | 单张图上限，超了跳过并记日志                                                                              |
 
 只支持 `image/png`、`image/jpeg`、`image/webp`、`image/gif`。
 
@@ -2485,11 +2831,11 @@ qq_send_custom_face    → 按编号发出去
 
 `qq-mcp/cache/` 里是这条链路的辅助文件：
 
-| 文件 | 作用 |
-|---|---|
-| `urls.json` | 上次拉到的收藏地址快照（顺序 **不代表** 编号） |
-| `catalog.json` | **94 条**编号 → 画面描述 + **身份键**（`key`） |
-| `sheet-1~3.png` | 拼好的总览图（分页缓存） |
+| 文件            | 作用                                           |
+| --------------- | ---------------------------------------------- |
+| `urls.json`     | 上次拉到的收藏地址快照（顺序 **不代表** 编号） |
+| `catalog.json`  | **94 条**编号 → 画面描述 + **身份键**（`key`） |
+| `sheet-1~3.png` | 拼好的总览图（分页缓存）                       |
 
 **编号是目录里的名字，不是列表位置。** 2026-10-19 出现过一次事故：`#73 得意指着人`
 实际发出去的是 `#22 我死，我死，我死…`。目录没有标错 —— 是 QQ 的 `fetch_custom_face`
@@ -2558,11 +2904,19 @@ QQ 内置表情不需要图片文件，直接用 `face` 段按 ID 发即可：
   所以不进工作区、也不占发送快照的配额。
 - 库长什么样：`<root>/index.json` + `clips/`。
   ```json
-  { "clips": [
-    { "id": "yuai-sifeng", "label": "雨爱(司凤版)", "file": "clips/yuai-sifeng.mp3",
-      "spoken": "唱了一段《雨爱》（司凤版）", "description": "整首 2 分 20 秒，点歌时用",
-      "tags": ["唱歌", "雨爱"], "durationMs": 140147 }
-  ] }
+  {
+    "clips": [
+      {
+        "id": "yuai-sifeng",
+        "label": "雨爱(司凤版)",
+        "file": "clips/yuai-sifeng.mp3",
+        "spoken": "唱了一段《雨爱》（司凤版）",
+        "description": "整首 2 分 20 秒，点歌时用",
+        "tags": ["唱歌", "雨爱"],
+        "durationMs": 140147
+      }
+    ]
+  }
   ```
   `spoken` 是发给模型自己看的"我刚才唱了什么"：语音不入库转写（入站转写只处理别人发的），
   没有它，下一轮它就不知道上一轮放了哪首。
@@ -2607,12 +2961,12 @@ QQ 内置表情不需要图片文件，直接用 `face` 段按 ID 发即可：
 
 现在每次发送带一个稳定的幂等键，落一条回执：
 
-| 状态 | 含义 | 再调一次会怎样 |
-|---|---|---|
-| `SUCCEEDED` / `PARTIAL` / `SKIPPED` | 已有确定结果 | **重放**，不重新发 |
-| `FAILED` | 确定没发出去 | 允许重试 |
-| `EXECUTING` | 可能还在途 | **拦住**，不许并发重发 |
-| `UNKNOWN` | 结果未知（超时/断连/5xx） | **拦住**，要求先人工核对 |
+| 状态                                | 含义                      | 再调一次会怎样           |
+| ----------------------------------- | ------------------------- | ------------------------ |
+| `SUCCEEDED` / `PARTIAL` / `SKIPPED` | 已有确定结果              | **重放**，不重新发       |
+| `FAILED`                            | 确定没发出去              | 允许重试                 |
+| `EXECUTING`                         | 可能还在途                | **拦住**，不许并发重发   |
+| `UNKNOWN`                           | 结果未知（超时/断连/5xx） | **拦住**，要求先人工核对 |
 
 关键设计：**`UNKNOWN` 绝不自动重发**。它必须被"看见"，所以 `GET /qq/onebot`
 的 `reliability.待核对` 和 MCP 的 `qq_reliability_status` 都会把它列出来。
@@ -2630,11 +2984,11 @@ QQ 内置表情不需要图片文件，直接用 `face` 段按 ID 发即可：
 
 三道闸现在各自独立生效：
 
-| 位置 | 做的事 |
-|---|---|
-| `runner.mjs` `mergeTextParts` | 拼多个 text part 时丢弃**完全相同/是尾巴/是前缀**的那一份，其余照原样拼接；丢弃数记进 `stats.dupTextParts` 与 `lastTurn.dupTextParts` |
-| `reply-policy.mjs` `extractStickerMarker` | 标记**全摘**（不只是第一个），`[表情:…]` 残骸也摘；`[表情包]` 这种正文不动 |
-| `reply-policy.mjs` `collapseRepeatedReply` | 拆气泡前把"整段重复两遍"的正文折回一份（段数需 ≥4 且前后两半完全相等），`stats.repeatedReplyCollapsed` 计数 |
+| 位置                                       | 做的事                                                                                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `runner.mjs` `mergeTextParts`              | 拼多个 text part 时丢弃**完全相同/是尾巴/是前缀**的那一份，其余照原样拼接；丢弃数记进 `stats.dupTextParts` 与 `lastTurn.dupTextParts` |
+| `reply-policy.mjs` `extractStickerMarker`  | 标记**全摘**（不只是第一个），`[表情:…]` 残骸也摘；`[表情包]` 这种正文不动                                                            |
+| `reply-policy.mjs` `collapseRepeatedReply` | 拆气泡前把"整段重复两遍"的正文折回一份（段数需 ≥4 且前后两半完全相等），`stats.repeatedReplyCollapsed` 计数                           |
 
 克制的地方：只有**一模一样**才算重复，不做相似度猜测；单段重复两遍（"哈？\n\n哈？"）
 不动 —— 那可能是她在重复，是人味，不是故障。
@@ -2668,10 +3022,10 @@ QQ 内置表情不需要图片文件，直接用 `face` 段按 ID 发即可：
 
 ### 发送配额（持久）
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `sendQuotaPerHour` | 600 | 每会话每小时上限，0 = 不限制 |
-| `sendQuotaPerMinute` | 20 | 每会话每分钟上限，挡突发刷屏 |
+| 配置                 | 默认 | 说明                         |
+| -------------------- | ---- | ---------------------------- |
+| `sendQuotaPerHour`   | 600  | 每会话每小时上限，0 = 不限制 |
+| `sendQuotaPerMinute` | 20   | 每会话每分钟上限，挡突发刷屏 |
 
 **限额落盘**，所以插件重载/进程重启**不会**把额度清零（Tulpa 的明确要求）。
 被配额拒绝时不会占用幂等键，等额度恢复后还能正常发。
@@ -2684,15 +3038,15 @@ QQ 内置表情不需要图片文件，直接用 `face` 段按 ID 发即可：
 QQ_CAPABILITIES=send_text,send_sticker,read_favorites
 ```
 
-| 能力位 | 覆盖的工具 |
-|---|---|
-| `send_text` | `qq_send_group_msg` / `qq_send_private_msg` |
-| `send_sticker` | `qq_send_sticker` / `qq_send_custom_face` / `qq_send_mface` / `qq_send_library_sticker` |
-| `send_voice` | `qq_send_ai_voice`（QQ 内置 AI 语音）与 `qq_send_voice`（语音库里的一段音频）。**只授了 `send_sticker` 的旧配置也认**，想单独收回语音就把两个都去掉 |
-| `read_favorites` | `qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face` |
-| `read_image` | `qq_read_image` / `qq_collect_sticker` / `qq_view_library_sticker`；配合 `read_forward` 读取转发图片 |
-| `manage_group` | `qq_delete_msg`、`qq_manage_group`（禁言/踢人/改名/改名片/发·删公告） |
-| `set_profile` | `qq_set_profile`（改自己的昵称/个性签名；老配置里的 `manage_group` 也认）|
+| 能力位           | 覆盖的工具                                                                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `send_text`      | `qq_send_group_msg` / `qq_send_private_msg`                                                                                                         |
+| `send_sticker`   | `qq_send_sticker` / `qq_send_custom_face` / `qq_send_mface` / `qq_send_library_sticker`                                                             |
+| `send_voice`     | `qq_send_ai_voice`（QQ 内置 AI 语音）与 `qq_send_voice`（语音库里的一段音频）。**只授了 `send_sticker` 的旧配置也认**，想单独收回语音就把两个都去掉 |
+| `read_favorites` | `qq_list_custom_faces` / `qq_custom_face_sheet` / `qq_view_custom_face` / `qq_send_custom_face`                                                     |
+| `read_image`     | `qq_read_image` / `qq_collect_sticker` / `qq_view_library_sticker`；配合 `read_forward` 读取转发图片                                                |
+| `manage_group`   | `qq_delete_msg`、`qq_manage_group`（禁言/踢人/改名/改名片/发·删公告）                                                                               |
+| `set_profile`    | `qq_set_profile`（改自己的昵称/个性签名；老配置里的 `manage_group` 也认）                                                                           |
 
 **留空 = 全部允许**（兼容旧配置，行为不变）。一旦列出，就只有列出的能用，
 且拒绝信息会说清是**哪一层**拦下来的。
@@ -2706,12 +3060,12 @@ QQ_CAPABILITIES=send_text,send_sticker,read_favorites
 比"目录里丢图片"强的地方在于：**同一张图只占一份空间**，而且能记住"这张我看过、
 它是这个意思"，下次不用重看。
 
-| 工具 | 作用 |
-|---|---|
-| `qq_collect_sticker` | 存图 + 记笔记（描述/情绪/用途/何时别用）；`uncertainty=true` 表示没看清 |
-| `qq_list_library_stickers` | `candidates=true` 取**可直接使用**的候选；否则关键词检索 |
-| `qq_view_library_sticker` | 看某张到底长什么样 |
-| `qq_send_library_sticker` | 发出去（发送前校验真实字节哈希） |
+| 工具                       | 作用                                                                    |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `qq_collect_sticker`       | 存图 + 记笔记（描述/情绪/用途/何时别用）；`uncertainty=true` 表示没看清 |
+| `qq_list_library_stickers` | `candidates=true` 取**可直接使用**的候选；否则关键词检索                |
+| `qq_view_library_sticker`  | 看某张到底长什么样                                                      |
+| `qq_send_library_sticker`  | 发出去（发送前校验真实字节哈希）                                        |
 
 和 Tulpa 对齐的几条规则：
 
@@ -2775,21 +3129,21 @@ node tools/run-tests.mjs
 
 仅 debugUsers 名单中的用户可使用。支持私聊或群里 @ 机器人后发命令，所有结果都私聊回复。查询不会提交 Agent，也不会消耗群聊未读或新建会话。
 
-| 命令 | 作用 |
-|---|---|
-| `#debug` / `#debug help` | 完整帮助 |
-| `#debug status` | 简洁摘要：托管、版本、运行时间、QQ 在线状态、心跳、发送队列、最近错误及 5 个会话 |
-| `#debug status detail` | 更多模型回合、记忆提炼、配置和事件统计 |
-| `#debug status json` | 有界 JSON 诊断数据，不含消息正文或凭据 |
-| `#debug status group:123456` | 在私聊中查看指定已记录群会话 |
-| `#debug heartbeat [group:123456]` | 每群未读进度、剩余冷却/重试时间、最近判断与原因 |
-| `#debug sessions [页码]` | 所有会话，按最近消息排序，每页 20 个 |
-| `#debug delivery` | 发送队列、成功/失败计数和持久化回执 |
-| `#debug events` | 上报分类及过滤、重复、托管关闭等处理计数 |
-| `#debug config` | 当前生效的模型、触发、窗口、图片和记忆策略 |
-| `#debug persona` | 实际人设原文 |
-| `#debug prompt [group:123456]` | 含未读快照的提示词预览，当前消息使用占位，不提交模型 |
-| `#debug memory [QQ号]` | 指定用户记忆；省略参数则显示自己、最近参与者及本会话约定存档（该面关闭时会标注「已关闭注入与提炼」）|
+| 命令                              | 作用                                                                                                 |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `#debug` / `#debug help`          | 完整帮助                                                                                             |
+| `#debug status`                   | 简洁摘要：托管、版本、运行时间、QQ 在线状态、心跳、发送队列、最近错误及 5 个会话                     |
+| `#debug status detail`            | 更多模型回合、记忆提炼、配置和事件统计                                                               |
+| `#debug status json`              | 有界 JSON 诊断数据，不含消息正文或凭据                                                               |
+| `#debug status group:123456`      | 在私聊中查看指定已记录群会话                                                                         |
+| `#debug heartbeat [group:123456]` | 每群未读进度、剩余冷却/重试时间、最近判断与原因                                                      |
+| `#debug sessions [页码]`          | 所有会话，按最近消息排序，每页 20 个                                                                 |
+| `#debug delivery`                 | 发送队列、成功/失败计数和持久化回执                                                                  |
+| `#debug events`                   | 上报分类及过滤、重复、托管关闭等处理计数                                                             |
+| `#debug config`                   | 当前生效的模型、触发、窗口、图片和记忆策略                                                           |
+| `#debug persona`                  | 实际人设原文                                                                                         |
+| `#debug prompt [group:123456]`    | 含未读快照的提示词预览，当前消息使用占位，不提交模型                                                 |
+| `#debug memory [QQ号]`            | 指定用户记忆；省略参数则显示自己、最近参与者及本会话约定存档（该面关闭时会标注「已关闭注入与提炼」） |
 
 会话参数也支持 user:QQ号。查询不存在的会话会提示，不创建空会话；大结果按行分段并标注页次。调试前缀须有空白边界，#debugging 等普通文本不会被误识别。
 
@@ -2798,6 +3152,7 @@ status 同时探测 get_login_info 和 get_status，区分“QQ 在线”“QQ �
 计数从最近一次插件加载起累计；收到上报包括通知、申请与调试，进入回复流程不代表实际送达。“心跳发起回复”与发送回执分开显示，UNKNOWN 回执需要核对。
 
 prompt 是诊断预览：静态块按当前 Session 策略决定，未读只在副本中合并；实际消息、触发方式和气泡抽签仍会影响最终提示词。
+
 ### 两条安全设计
 
 **① 这些命令不经过模型。** 命令由桥接直接处理并回复，提示词里**从来没有这个暗号**。
@@ -2812,8 +3167,8 @@ prompt 是诊断预览：静态块按当前 Session 策略决定，未读只在�
 ### 配置
 
 ```yaml
-debugUsers: [ '1056612947' ]   # 允许用调试命令的 QQ 号。空数组 = 完全关闭
-debugPrefix: '#debug'
+debugUsers: ["1056612947"] # 允许用调试命令的 QQ 号。空数组 = 完全关闭
+debugPrefix: "#debug"
 ```
 
 只有名单里的 QQ 号能触发；其他人发同样的文本会被当成普通消息走正常流程。
@@ -2845,7 +3200,7 @@ SnowLuma 的 HTTP server 要把事件上报到本插件：
   ```yaml
   - id: hmr
     config:
-      root: ['.', 'D:/Code/dsh-qq-bridge']
+      root: [".", "D:/Code/dsh-qq-bridge"]
   ```
 - **不要用 PowerShell 的 `Set-Content`/`Add-Content` 改这个文件**——Windows PowerShell 会按 ANSI 读取，把中文变成乱码。用编辑工具。
 
@@ -2859,11 +3214,11 @@ QQ 会话里的 Agent 拥有 preset 给它的全部工具（文件系统、网�
 
 已经内建的三道防线：
 
-| 防线 | 说明 |
-|---|---|
-| 踢人必须人批准 | 不可逆动作一律走 `pending_actions` 待办（§10）|
-| `handle_request` 默认不授予 | 没有任何工具能同意加好友/入群申请（§9）|
-| 只读 SQL 的数据库级沙箱 | 范围外的记录**物理上不在表里**（§5）|
+| 防线                        | 说明                                           |
+| --------------------------- | ---------------------------------------------- |
+| 踢人必须人批准              | 不可逆动作一律走 `pending_actions` 待办（§10） |
+| `handle_request` 默认不授予 | 没有任何工具能同意加好友/入群申请（§9）        |
+| 只读 SQL 的数据库级沙箱     | 范围外的记录**物理上不在表里**（§5）           |
 
 ## 已知限制
 

@@ -17,21 +17,21 @@ async function test(name, fn) {
   try { await fn(); passed++; console.log('  ✓ ' + name); }
   catch (error) { failed++; console.error('  ✗ ' + name, error); }
 }
-function rig() {
+function rig({ conversation = 'group:10' } = {}) {
   const dir = path.join(root, String(sequence++)); fs.mkdirSync(dir);
   const store = new Store(path.join(dir, 'test.sqlite3')); stores.push(store);
   const cfg = config({ memoryEnabled: true, memoryDir: path.join(dir, 'memory'), groupEnabled: true,
     groups: ['10'], privateEnabled: true, users: ['200'], memoryInjectMaxChars: 1600 });
   const memory = new MemoryStore({ logger: { warn() {} } }, cfg, store);
-  const origin = memory.episodes.origin('group:10', { qq: '200', who: '甲', messageId: '1',
+  const origin = memory.episodes.origin(conversation, { qq: '200', who: '甲', messageId: '1',
     text: '请记住我十月到十二月在实习。我不吃香菜。忘记我的偏好。恢复旧版本。', at: Date.now() });
-  const registry = { byKey: new Map([['group:10', { sessionId: 'session-a' }]]) };
+  const registry = { byKey: new Map([[conversation, { sessionId: 'session-a' }]]) };
   const state = { enabled: true, disposed: false, sourceLedger: memory.episodes,
     // 这些用例代表"后台写者"（收尾/自主时间）——房间里的普通回合写不了 scope=self，
     // 那条边界由 agent-memory.test.mjs 的"房间不能替她署名"单独钉。
     memoryFlushSessions: new Set(), selfTurnSessions: new Set(['session-a']) };
   const tool = memoryTool({ memory, registry, store, config: cfg, state });
-  publishTurnSession(store, 'session-a', { conversation: 'group:10', sourceRef: origin });
+  publishTurnSession(store, 'session-a', { conversation, sourceRef: origin });
   const call = (args, session = 'session-a') => tool.execute(args,
     { agent: { session: { id: session } }, signal: new AbortController().signal });
   const write = (args = {}) => call({ action: 'upsert', slot: 'profile.internship', version: 0,
@@ -85,9 +85,8 @@ try {
     assert.equal(r.memory.agent.latest('200')[0].version, 3);
     assert.match(r.memory.read('200'), /很重视记忆/);
   });
-  await test('another Session, fabricated evidence, disabled hosting and revoked source cannot write', () => {
+  await test('another Session, disabled hosting and revoked source cannot write', () => {
     const r = rig(); assert.throws(() => r.call({ action: 'read' }, 'session-other'), /来源无效|当前 Session/);
-    assert.throws(() => r.write({ evidence: '我今年毕业' }), /真实原文/);
     r.state.enabled = false; assert.throws(() => r.write(), /不可用|关闭/); r.state.enabled = true;
     r.memory.episodes.retract('group:10', '1'); assert.throws(() => r.write(), /来源无效/);
     assert.equal(r.memory.agent.latest('200').length, 0);
@@ -163,6 +162,133 @@ try {
     const read = r.call({ action: 'read', scope: 'self' });
     assert.ok(read.chars > 0, '收尾会话写下的条目应当读得到');
   });
+  /**
+   * 2026-11-01 线上：她想记「他很在意被叫狗」，引的是他前面两句话拼起来的证据
+   * （中间还用 `___` 遮了一个词），校验只拿"触发本轮那一条"去比，永远比不上——
+   * 连着两次 Error，31 秒的一轮全废在写不进本子上。人的引用本来就是跨句的。
+   */
+  await test('引用可以跨句：用 / 分几段、每段都真出现过，就写得进去', () => {
+    const r = rig();
+    const say = (id, text) => r.store.recordEvent({ conversation: 'group:10', kind: 'inbound',
+      payload: { qq: '200', who: '甲', text, messageId: id }, deliverable: false });
+    say('7', '你这是…在骂我？');
+    say('8', '你这样说别人是狗别人是会不高兴的，你不知道吗？');
+    const ok = r.call({ action: 'upsert', scope: 'user', slot: 'taboo.being_called_dog', version: 0,
+      kind: 'explicit', text: '很在意被叫成狗',
+      evidence: '你这是___在骂我？ / 你这样说别人是狗别人是会不高兴的' });
+    assert.equal(ok.status, 'SAVED');
+  });
+
+  await test('编造的原话不会变成事实：降级成观察，并如实告诉她', () => {
+    // 2026-11-01（用户：「怎么写是她的自由」）：不再用报错把她挡在门外——
+    // 记不成事实就记成观察，回执里说清楚为什么。底线是"没原话撑腰的不能自称事实"。
+    const r = rig();
+    const out = r.call({ action: 'upsert', scope: 'user', slot: 'taboo.x', version: 0,
+      kind: 'explicit', text: '编的', evidence: '他从来没说过这句话' });
+    assert.equal(out.status, 'SAVED');
+    assert.equal(out.kind, 'impression');
+    assert.match(String(out.note ?? ''), /观察|没对上/u);
+    const hit = r.call({ action: 'read' }).records.find((x) => x.slot === 'taboo.x');
+    assert.equal(hit.kind, 'impression', '没对上原文的只能记成观察');
+  });
+
+  await test('自己的时间里也能记别人的事：指名 QQ 号即可，猜不出来才拦', () => {
+    const r = rig({ conversation: 'self:account' });
+    // 自主时间：origin 的发送者是她自己，宿主猜不出"他"是谁 —— 指名就能写。
+    const ok = r.call({ action: 'upsert', scope: 'user', subject: '200', slot: 'taboo.dog', version: 0,
+      kind: 'impression', text: '他好像很在意被叫狗' });
+    assert.equal(ok.status, 'SAVED');
+    assert.ok(r.memory.agent.latest('200').some((x) => x.slot === 'taboo.dog'));
+    // 不说记谁 → 拦，且给出下一步；白名单外的人 → 拦。
+    assert.throws(() => r.call({ action: 'upsert', scope: 'user', slot: 'x.y', version: 0,
+      kind: 'impression', text: '谁' }), /subject/u);
+    assert.throws(() => r.call({ action: 'upsert', scope: 'user', subject: '999999', slot: 'x.y', version: 0,
+      kind: 'impression', text: '谁' }), /名单/u);
+  });
+
+  await test('learned：写对的本子；人物本拒收是结构拦截不是提示词约定', () => {
+    const r = rig();
+    // 群本当场就能记（房间里的她只能记别人和群——群知识正好属于这里）。
+    assert.equal(r.call({ action: 'upsert', scope: 'group', slot: 'learn.docu', version: 0,
+      kind: 'learned', text: '这个群不喜欢纪录片' }).status, 'SAVED');
+    // 人物本拒收："学会的东西"没有主体落在某个人身上。
+    assert.throws(() => r.call({ action: 'upsert', slot: 'learn.x', version: 0,
+      kind: 'learned', text: '他教我的' }), /学会的东西不属于某个人/u);
+    // self 本只有后台写者能写（与日记同一条边界），写进去的 public 不许带号码。
+    assert.throws(() => r.call({ action: 'upsert', scope: 'self', slot: 'learn.priv', version: 0,
+      kind: 'learned', visibility: 'public', text: '找 12345678 问问' }), /public 的 learned/u);
+    assert.throws(() => r.call({ action: 'upsert', scope: 'self', slot: 'core.notlearned', version: 0,
+      kind: 'note', text: '普通记事' }), /core\. 前缀/u);
+    assert.equal(r.call({ action: 'upsert', scope: 'self', slot: 'core.learn.docu', version: 0,
+      kind: 'learned', visibility: 'public', text: '发长文会被嫌刷屏' }).status, 'SAVED');
+  });
+
+  await test('注入：群教训独立成块，不挤记事；日记块不混 learned', () => {
+    const r = rig();
+    r.call({ action: 'upsert', scope: 'group', slot: 'learn.docu', version: 0,
+      kind: 'learned', text: '这个群不喜欢纪录片' });
+    r.call({ action: 'upsert', scope: 'group', slot: 'rhythm.m1', version: 0,
+      kind: 'note', text: '群黑话备忘' });
+    const entry = { staticDone: true, memoryHashes: {} };
+    const out = buildMemoryInjection(r.cfg, message(2, '在吗'), entry, r.memory).text;
+    assert.match(out, /【这个群教我的】[\s\S]*这个群不喜欢纪录片/);
+    const notesBlock = out.split('【这个群的记事】')[1]?.split('【')[0] ?? '';
+    assert.match(notesBlock, /群黑话备忘/);
+    assert.doesNotMatch(notesBlock, /纪录片/, '记事块不混 learned');
+    const learnedBlock = out.split('【这个群教我的】')[1]?.split('【')[0] ?? '';
+    assert.match(learnedBlock, /纪录片/);
+    assert.doesNotMatch(learnedBlock, /群黑话备忘/, '教训块不混 note');
+  });
+
+  await test('注入：private 的教训在写下它的房间可见，别的群看不到；pin 排在前面', () => {
+    const r = rig();
+    r.call({ action: 'upsert', scope: 'self', slot: 'core.learn.docu', version: 0,
+      kind: 'learned', visibility: 'public', text: '发长文会被嫌刷屏' });
+    r.call({ action: 'upsert', scope: 'self', slot: 'learn.local', version: 0,
+      kind: 'learned', text: '在这儿学到的 privately' });
+    const entry = { staticDone: true, memoryHashes: {} };
+    const here = buildMemoryInjection(r.cfg, message(2, '在吗'), entry, r.memory).text;
+    assert.match(here, /【我学会的】/);
+    assert.match(here, /发长文会被嫌刷屏/);
+    assert.match(here, /在这儿学到的 privately/, 'private 的 learned 回到写下它的房间该认得');
+    const other = buildMemoryInjection(r.cfg, message(3, '在吗', 20), { staticDone: true, memoryHashes: {} },
+      r.memory).text;
+    assert.doesNotMatch(other, /在这儿学到的 privately/, 'private 的教训不出本群');
+    assert.match(other, /发长文会被嫌刷屏/, 'public 的教训跟着她走所有群');
+    const block = here.split('【我学会的】')[1] ?? '';
+    assert.ok(block.indexOf('发长文会被嫌刷屏') < block.indexOf('在这儿学到的'), 'pin 优先于最新补位');
+  });
+
+  await test('注入：limit 5 硬顶，第 6 条留库不进块', () => {
+    const r = rig();
+    for (let i = 0; i < 6; i++) {
+      r.call({ action: 'upsert', scope: 'group', slot: `learn.n${i}`, version: 0,
+        kind: 'learned', text: `教训${i}` });
+      // 拉开时间戳：n0 最旧、n5 最新——补位顺序才可断言。
+      r.store.db.prepare('UPDATE bridge_agent_memories SET updated_at = ? WHERE slot = ?')
+        .run(Date.now() + i * 60000, `learn.n${i}`);
+    }
+    const entry = { staticDone: true, memoryHashes: {} };
+    const out = buildMemoryInjection(r.cfg, message(2, '在吗'), entry, r.memory).text;
+    const block = out.split('【这个群教我的】')[1]?.split('【')[0] ?? '';
+    const lines = block.split('\n').filter((l) => l.startsWith('- '));
+    assert.equal(lines.length, 5, '块里最多 5 条');
+    assert.match(block, /教训5/, '最新的补位进块');
+    assert.doesNotMatch(block, /教训0/, '最旧的被挤出块，但留在库里');
+    assert.equal(r.memory.agent.latest('group:10').filter((x) => x.kind === 'learned').length, 6,
+      '第 6 条还在库里，只是不注入');
+  });
+
+  await test('工具描述列出 learned 的触发条件与 core. 钉住语义', async () => {
+    const r = rig();
+    const { memoryTool } = await import('../lib/memory/tool.mjs');
+    const tool = memoryTool({ memory: r.memory, registry: { byKey: new Map() }, store: r.store,
+      config: r.cfg, state: { enabled: true, disposed: false, sourceLedger: r.memory.episodes } });
+    assert.match(tool.description, /learned/u);
+    assert.match(tool.description, /core\./u);
+    assert.match(JSON.stringify(tool.parameters), /learned/u);
+  });
+
 } finally { for (const s of stores) s.db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 console.log(`${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;

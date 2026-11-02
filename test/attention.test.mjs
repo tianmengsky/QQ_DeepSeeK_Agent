@@ -272,7 +272,8 @@ try {
     const config = Config({ selfIds: ['100'] });
     const first = buildPrompt(message(13), config,
       { awake: true, includeStatic: true, attention: { kind: 'consider' } });
-    assert.match(first, /甲乙正在互相回答 → \[SKIP\]/);
+    // 钉行为不钉措辞：这一轮必须同时给出两个出口——等（[WAIT]）和旁听（[SKIP]）。
+    assert.match(first, /\[WAIT\][\s\S]*?\[SKIP\]/);
     const prompt = buildPrompt(message(13), config,
       { awake: true, includeStatic: false, attention: { kind: 'consider' } });
     assert.match(prompt, /结合 @、引用和来回辨认对象/);

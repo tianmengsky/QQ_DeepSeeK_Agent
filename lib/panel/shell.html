@@ -192,6 +192,47 @@ main{max-width:1560px;margin:0 auto;padding:16px 22px 80px;display:grid;gap:14px
 .kv dd{margin:0;color:var(--text);min-width:0;overflow-wrap:anywhere}
 .kv .sub{color:var(--muted);font-size:11.5px;line-height:1.55}
 
+/* —— 自主层：钟 / 今天的账 / 按目标学习 + 一整行账本 —— */
+#proactive-card[data-hide=true]{display:none}
+#proactive-note{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+#proactive-body{display:grid;gap:12px 20px;align-items:start;
+  grid-template-columns:minmax(0,1.1fr) minmax(0,.85fr) minmax(0,1.05fr)}
+@media (max-width:1120px){#proactive-body{grid-template-columns:minmax(0,1fr)}}
+.pcol{display:grid;gap:7px;align-content:start;min-width:0}
+.pwide{grid-column:1/-1;border-top:1px solid var(--line);padding-top:9px;display:grid;gap:5px}
+.ph{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+.ph b{font-family:var(--mono);font-size:17px;color:var(--text);font-variant-numeric:tabular-nums}
+#proactive-body .sub-head{margin:9px 0 1px}
+#proactive-body .chips{margin-bottom:0;gap:5px}
+#proactive-body .sub{color:var(--muted);font-size:11.5px;line-height:1.5}
+.pquote{border-left:2px solid var(--accent);padding:1px 0 1px 8px;color:var(--muted);
+  font-size:11.5px;line-height:1.55;overflow-wrap:anywhere}
+.pline{display:flex;align-items:baseline;gap:8px;font-size:12px;min-width:0;padding:1px 0}
+.pline .pname{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38%;font-family:var(--mono);font-size:11.5px}
+.pline .muted{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pline .badge{flex:none}
+.pline[data-tone=err] .pname{color:var(--muted)}
+.badge[data-tone=ok]{border-color:var(--ok);color:var(--ok);background:var(--tint-ok)}
+.badge[data-tone=warn]{border-color:var(--gold);color:var(--warn);background:var(--tint-warn)}
+.badge[data-tone=err]{border-color:var(--err);color:var(--err);background:var(--tint-err)}
+.badge[data-tone=skip]{border-color:var(--line2);color:var(--dim);background:transparent}
+
+/* —— 消息准入：一条消息去了哪儿 —— */
+#admission-card[data-hide=true]{display:none}
+#admission-note{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+#admission-body{display:grid;gap:8px;min-width:0}
+#admission-body .chips{margin-bottom:0}
+.adm-row{display:flex;align-items:baseline;gap:8px;font-size:12px;min-width:0;padding:1px 0}
+.adm-row .mono{flex:none}
+.adm-row .adm-who{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:26%;font-size:11.5px}
+.adm-row .adm-text{flex:1;min-width:0;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.adm-row .badge{flex:none}
+/* 判断流那一行"最后发生了什么"：只在有结果时出现，和裁决同一行距。 */
+.jd-outcome{margin-top:2px;font-size:11.5px;color:var(--muted)}
+.jd-outcome[data-tone=ok]{color:var(--ok)}
+.jd-outcome[data-tone=err]{color:var(--err)}
+.jd-outcome[data-tone=warn]{color:var(--warn)}
+
 /* —— 表格 —— */
 .tbl-wrap{overflow:auto;max-height:min(58vh,520px)}
 table.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
@@ -365,6 +406,19 @@ textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
       <div class="card-body"><dl class="kv" id="recent"></dl></div>
     </section>
   </div>
+
+  <section class="card" id="proactive-card" data-hide="true">
+    <div class="card-head">自主层 <span class="muted" id="proactive-note"></span>
+      <span class="spacer"></span>
+      <button id="proactive-tick" title="不等钟，立刻让她看一眼「现在要不要主动做点什么」（会花一次模型调用）">现在醒一次</button>
+    </div>
+    <div class="card-body" id="proactive-body"></div>
+  </section>
+
+  <section class="card" id="admission-card" data-hide="true">
+    <div class="card-head">消息准入 <span class="muted" id="admission-note"></span></div>
+    <div class="card-body" id="admission-body"></div>
+  </section>
 
   <section class="card">
     <div class="card-head">会话 <span class="muted" id="session-summary"></span>

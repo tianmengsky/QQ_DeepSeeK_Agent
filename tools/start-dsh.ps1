@@ -16,6 +16,12 @@ param(
   [switch]$NoWait
 )
 
+# 中文输出统一走 UTF-8。
+# PowerShell 的 Write-Host 默认按系统 OEM 编码（简体中文是 936/GBK）写管道，
+# 而控制台（node）按 UTF-8 读 —— 不设这里，job 日志里就是乱码。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 $ErrorActionPreference = 'Continue'
 
 function Say($text) { Write-Host $text }
@@ -120,10 +126,17 @@ if (Test-Path -LiteralPath $guard) {
 #      起的 GUI 程序会被立刻掐死（ExitCode 0、不留任何日志）。WMI 建的进程挂到
 #      WmiPrvSE 下面，不受那层作业管制，能正常进入用户桌面。
 # 同一条结论在 console.ps1（起 node）和 start-qq-mcp.ps1（起 NapCat）里各写过一次。
+#
+# 2026-11-02 崩溃缓解：启动参数带 --disable-gpu（安全启动）。
+# 背景：渲染进程反复 0xC0000005，已符号化定位在 Blink 合成器
+# （GeometryMapper::VisualRectForCompositingOverlap）与 V8，插件层排查干净。
+# 本机是 RTX 5060 Laptop + Intel UHD 双 GPU 混合输出，GPU 合成路径是
+# 头号嫌疑。关 GPU 跑软件渲染做对照；若确认与 GPU 相关，长期方案是
+# 回退 NVIDIA 驱动或只保留 --disable-gpu-compositing。
 $created = $null
 try {
   $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-    CommandLine = '"' + $target + '"'
+    CommandLine = '"' + $target + '" --disable-gpu'
     CurrentDirectory = (Split-Path -Path $target -Parent)
   }
 } catch {
@@ -132,7 +145,7 @@ try {
 if ($null -eq $created -or $created.ReturnValue -ne 0) {
   if ($null -ne $created) { Say "WMI 返回 $($created.ReturnValue)，改用 Start-Process" }
   try {
-    Start-Process -FilePath $target | Out-Null
+    Start-Process -FilePath $target -ArgumentList '--disable-gpu' | Out-Null
   } catch {
     Say "启动失败：$($_.Exception.Message)"
     exit 1

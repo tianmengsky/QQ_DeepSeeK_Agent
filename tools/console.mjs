@@ -25,7 +25,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const project = fileURLToPath(new URL('..', import.meta.url));
@@ -292,22 +292,64 @@ export async function probe(config, { cache = { at: 0, value: null }, bridgeCach
 
 const POWERSHELL = 'powershell.exe';
 
-function runPowerShell(script, args, { cwd, onLine, timeout = 240000 }) {
+/**
+ * 超时那一刻，谁还活着。
+ *
+ * 2026-11-02 的事故：日志里每一步都成功了（"接管 build=… 托管=True"），控制台却报
+ * "超过 240 秒没有结束"。原因是判定用的是**管道 EOF**：脚本起的 QQ / SnowLuma 这类
+ * 长命进程会继承 stdout，脚本早就退了，管道却一直开着。
+ * 把判定改成 exit 能修好，但下次再卡还得靠猜 —— 所以顺手把还挂着的子进程点出来。
+ */
+function survivorsOf(pid) {
+  if (!pid) return [];
+  try {
+    const script = `$p=${pid}; Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ParentProcessId -eq $p } | ForEach-Object { $_.Name + '#' + $_.ProcessId }`;
+    const out = execFileSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: 3000, encoding: 'utf8' });
+    return String(out).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+export function runPowerShell(script, args, { cwd, onLine, timeout = 240000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', script, ...args], { cwd, windowsHide: true });
     let settled = false;
-    const timer = setTimeout(() => {
+    /** 每条流各自的半行缓冲：收尾时要把最后一行吐出去。 */
+    const pending = new Map();
+    const flush = () => {
+      for (const buffer of pending.values()) {
+        const line = buffer.trim();
+        if (line) onLine?.(line);
+      }
+      pending.clear();
+    };
+    const settle = (code) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      flush();
+      // 主动关管道：被子进程继承的那一头不会自己关，不 destroy 就一直挂着。
+      try { child.stdout.destroy(); child.stderr.destroy(); } catch { /* 已关闭 */ }
+      if (code === 0) resolve();
+      else reject(new Error(`退出码 ${code}`));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      const stuck = survivorsOf(child.pid);
+      settled = true;
+      flush();
       try { child.kill(); } catch { /* 已经退出 */ }
-      reject(new Error(`超过 ${Math.round(timeout / 1000)} 秒没有结束，已放弃等待`));
+      reject(new Error(`超过 ${Math.round(timeout / 1000)} 秒没有结束，已放弃等待` +
+        (stuck.length ? `（还挂着：${stuck.join('、')}）` : '')));
     }, timeout);
-    const relay = (stream) => {
-      let buffer = '';
+    const relay = (name, stream) => {
+      pending.set(name, '');
       stream.setEncoding('utf8');
       stream.on('data', (chunk) => {
-        buffer += chunk;
+        let buffer = pending.get(name) + chunk;
         for (;;) {
           const index = buffer.search(/\r?\n/);
           if (index < 0) break;
@@ -315,27 +357,28 @@ function runPowerShell(script, args, { cwd, onLine, timeout = 240000 }) {
           buffer = buffer.slice(index + 1).replace(/^\n/, '');
           if (line) onLine?.(line);
         }
-      });
-      stream.on('end', () => {
-        const line = buffer.trim();
-        if (line) onLine?.(line);
+        pending.set(name, buffer);
       });
     };
-    relay(child.stdout);
-    relay(child.stderr);
+    relay('stdout', child.stdout);
+    relay('stderr', child.stderr);
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       reject(error);
     });
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`退出码 ${code}`));
+    /**
+     * **判定看 exit，不看 close。**
+     *
+     * close 要等所有 stdio 关完，而脚本里的 `Start-Process`（QQ、DSH 这类）会把
+     * 这两根管道继承下去 —— 于是"脚本明明成功了，却永远等不到 close"。
+     * exit 只表示进程本身结束，再给 250ms 把剩余输出冲出来就够了。
+     */
+    child.on('exit', (code) => {
+      setTimeout(() => settle(code ?? 0), 250);
     });
+    child.on('close', (code) => settle(code ?? 0));
   });
 }
 

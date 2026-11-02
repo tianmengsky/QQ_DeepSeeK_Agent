@@ -197,60 +197,77 @@ await test('她发出去的消息 ID 会被记下来（表情回应靠它判断�
   assert.ok(state.ownMessageIds.size > 0, 'ownMessageIds 应该有内容，否则表情回应分不清归属');
 });
 
-console.log('\ndeliver: 引用发送功能**已移除**（这几条钉住这个事实）');
+console.log('\ndeliver: 引用回复（[引用:消息ID]）');
 
 /**
- * `[引用]` 暗号 → OneBot reply 段 这套功能已经**整块去掉**。
+ * 2026-11-02：引用回复以**带 ID** 的形式回来了。
  *
- * 为什么去掉：实测在群里会把 `[引用]` 这个标记本身当正文发出去
- * （用户看到的就是孤零零一行「[引用]」），而不是变成引用。
- * 与其留着让人踩，不如去掉 —— 模型用正常文字表达"我在回谁"就够了。
+ * 旧的 `[引用]` 暗号（引"当前这条"）当天就撤了 —— 它没有目标可校验，实测会把
+ * 标记本身发进群。现在她手上有消息 ID，写成 `[引用:ID]` 就是明确说"接着这条说"，
+ * 于是可以校验（只认本窗口出现过的 ID）、可以摘干净（校验不过就摘掉、正文照发）。
  *
- * 这几条测试的意义是**防回归**：如果哪天有人手滑把它加回来，
- * 这里会立刻变红。
- *
- * 注意区分：**别人发来的引用**仍然会被解析成上下文（见 resolveQuote），
- * 那是"读"，不受影响。
+ * 这几条钉的是三个出口：挂上 reply 段、摘掉不存在的 ID、以及语法绝不漏进群。
  */
-await test('回复里带 [引用] 时，整条按**纯文本**原样发出（不再挂 reply 段）', async () => {
+function quotedEntry(ids = []) {
+  return {
+    window: ids.map((id, i) => ({ qq: '1', who: 'x', bot: false, messageId: id, text: 'hi', at: i + 1 })),
+    recentQqs: [], turns: 0, awakeUntil: 0, lastSpokeAt: 0,
+  };
+}
+
+await test('窗口里有的 ID → 真的挂上 reply 段，标记不进正文', async () => {
   const calls = fakeOnebot();
-  const ctx = fakeCtx();
-  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
   const stats = {};
-  const sent = await bridge.__test.deliverReply(ctx, baseConfig(), {
-    entry: fakeEntry(),
+  await bridge.__test.deliverReply(fakeCtx(), baseConfig(), {
+    entry: quotedEntry(['700123']),
     stats,
     key: 'group:999001',
-    reply: '[引用] 这条是回复上面那句',
+    reply: '『[引用:700123] 你刚才那句我没懂』',
     shape: null,
     target: { group_id: 999001 },
     isGroup: true,
     speakerQq: '1',
     speakerName: 'x',
-    state,
-    // 就算调用方给了 quoteId（旧接口），也不该再产生 reply 段
-    quoteId: '700123',
+    state: { ownMessageIds: new Set(), pendingReactions: new Map() },
   });
-  assert.equal(sent, true, '不该因为引用而失败');
   const grp = calls.filter((c) => c.action === 'send_group_msg');
   assert.equal(grp.length, 1);
   const msg = grp[0].payload.message;
-  assert.equal(
-    typeof msg,
-    'string',
-    '现在应该始终是纯文本 —— 出现消息段数组说明引用功能被加回来了',
-  );
-  assert.ok(!JSON.stringify(msg).includes('"reply"'), '不该有 reply 段');
-  assert.equal(stats.quotesRequested, undefined, '不该再统计引用请求');
+  assert.ok(Array.isArray(msg), '有引用时必须走消息段');
+  assert.deepEqual(msg[0], { type: 'reply', data: { id: '700123' } }, 'reply 段要排在最前面');
+  assert.equal(msg[1].data.text, '你刚才那句我没懂');
+  assert.ok(!JSON.stringify(msg).includes('[引用'), '标记语法绝不能出现在发出去的内容里');
+  assert.equal(stats.quoteReplies, 1);
 });
 
-await test('引用相关的统计字段不再产生', async () => {
+await test('窗口里没有的 ID → 摘掉标记，正文照发、不挂 reply 段', async () => {
   const calls = fakeOnebot();
-  const ctx = fakeCtx();
-  const state = { ownMessageIds: new Set(), pendingReactions: new Map() };
   const stats = {};
-  await bridge.__test.deliverReply(ctx, baseConfig(), {
-    entry: fakeEntry(),
+  await bridge.__test.deliverReply(fakeCtx(), baseConfig(), {
+    entry: quotedEntry(['700123']),
+    stats,
+    key: 'group:999001',
+    reply: '『[引用:999999] 你刚才那句我没懂』',
+    shape: null,
+    target: { group_id: 999001 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state: { ownMessageIds: new Set(), pendingReactions: new Map() },
+  });
+  const grp = calls.filter((c) => c.action === 'send_group_msg');
+  const msg = grp[0].payload.message;
+  assert.equal(typeof msg, 'string', '校验不过就不该产生消息段');
+  assert.equal(msg, '你刚才那句我没懂');
+  assert.ok(stats.quoteDropped >= 1, '摘掉的引用要记一笔');
+  assert.equal(stats.quoteReplies, undefined);
+});
+
+await test('光秃秃的 [引用] 不留字、不挂段（旧暗号不会复活）', async () => {
+  const calls = fakeOnebot();
+  const stats = {};
+  await bridge.__test.deliverReply(fakeCtx(), baseConfig(), {
+    entry: quotedEntry(['700123']),
     stats,
     key: 'user:1',
     reply: '[引用] 没东西可引',
@@ -259,13 +276,32 @@ await test('引用相关的统计字段不再产生', async () => {
     isGroup: false,
     speakerQq: '1',
     speakerName: 'x',
-    state,
+    state: { ownMessageIds: new Set(), pendingReactions: new Map() },
   });
-  assert.equal(stats.quotesRequested, undefined);
-  assert.equal(stats.quotesSkipped, undefined, '移除后不该再记"想引用但没目标"');
   const priv = calls.filter((c) => c.action === 'send_private_msg');
   assert.equal(priv.length, 1);
-  assert.equal(typeof priv[0].payload.message, 'string');
+  assert.equal(priv[0].payload.message, '没东西可引');
+  assert.equal(stats.quoteReplies, undefined);
+});
+
+await test('引用开关关掉：标记仍然摘干净，只是不挂 reply 段', async () => {
+  const calls = fakeOnebot();
+  const stats = {};
+  await bridge.__test.deliverReply(fakeCtx(), baseConfig({ quoteReplyEnabled: false }), {
+    entry: quotedEntry(['700123']),
+    stats,
+    key: 'group:999001',
+    reply: '『[引用:700123] 嗯』',
+    shape: null,
+    target: { group_id: 999001 },
+    isGroup: true,
+    speakerQq: '1',
+    speakerName: 'x',
+    state: { ownMessageIds: new Set(), pendingReactions: new Map() },
+  });
+  const msg = calls.filter((c) => c.action === 'send_group_msg')[0].payload.message;
+  assert.equal(msg, '嗯', '关掉开关也不能让标记语法漏进群');
+  assert.equal(stats.quoteReplies, undefined);
 });
 
 await test('普通回复仍然是纯文本（不引入多余结构）', async () => {
@@ -283,7 +319,6 @@ await test('普通回复仍然是纯文本（不引入多余结构）', async ()
     speakerQq: '1',
     speakerName: 'x',
     state,
-    quoteId: '700123',
   });
   const grp = calls.filter((c) => c.action === 'send_group_msg');
   assert.equal(typeof grp[0].payload.message, 'string', '不该有 reply 段');

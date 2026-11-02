@@ -273,6 +273,22 @@ try {
     event.message_type='private';event.message=[image({summary:'[动画表情]',sub_type:1})];
     assert.equal(pictures(await buildPromptContent(r.ctx,r.config,event,r.stats)).length,1);
   });
+  // 2026-11-01：按需读图。像素一旦进会话就会被 DSH 每轮重发，
+  // 所以 onDemand 下桥接一张都不预附，只把目录和编号交给她。
+  await test('onDemand mode attaches no pixels at all but keeps the readable catalog', async () => {
+    const r = rig({ ...settings, imageMode: 'onDemand', contextImagesOnRequest: 1 }, '[SKIP]');
+    const event = message('ondemand', 'deepseek 看下这张图');
+    event.message.push(image());
+    const content = await buildPromptContent(r.ctx, r.config, event, r.stats, {
+      windowMessages: [{ messageId: 'older', qq: 300, images: [image()] }] });
+    assert.equal(pictures(content).length, 0);
+    assert.equal(r.calls.filter((c) => c.action === 'get_image').length, 0);
+    assert.deepEqual(content.imageCatalog.map((m) => m.messageId).sort(), ['older', 'ondemand']);
+    assert.match(content[0].text, /没有预附任何图片/);
+    assert.match(content[0].text, /qq_read_image/);
+    assert.equal(content[0].text.includes(root), false);
+    assert.deepEqual(content.imageInfo, { present: true, attached: false, attachedCount: 0 });
+  });
 } finally {
   globalThis.fetch = realFetch;
   fs.rmSync(root,{recursive:true,force:true});

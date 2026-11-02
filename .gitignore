@@ -21,6 +21,11 @@ node_modules/
 /qq-mcp/cache/
 /.codex-debug-stage/
 /.tmp/
+# 会话抢救产物（从崩溃的 session log 捞回的历史，含真实对话内容，不随公开仓库发布）
+/recovered.jsonl
+/.tmp-acl-report/
+/check_recovered.py
+/recover_session.py
 # 工具自己的内部笔记（含真实聊天摘录，与 HANDOFF 同级，不随公开仓库发布）
 /.workbuddy/
 t-out.txt

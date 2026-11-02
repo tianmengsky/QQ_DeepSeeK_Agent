@@ -51,6 +51,13 @@ function startFakeOnebot() {
   // 自己的账号资料。set_qq_profile / set_self_longnick 会真的改它，
   // 这样"改完回读核实"那一步才测得到（真实接入端也是靠回读取证的）。
   const self = { nickname: '测试鲸鱼', longNick: '' };
+  // QQ 空间说说。send_qzone_msg 会真的追加，get_qzone_msg_list 按 time 倒序回，
+  // 模拟"发表成功 → 回读确认"（真实 SnowLuma 的 qzone 层也会自己校验错误码）。
+  const qzoneMsgs = [];
+  let qzoneSeq = 0;
+  // 空间评论，按 tid 分组（comment_qzone 追加；msgdetail_v6 读）。
+  const qzoneComments = new Map();
+  let qzoneCommentSeq = 0;
   /**
    * 群状态。
    *
@@ -87,6 +94,20 @@ function startFakeOnebot() {
       res.writeHead(200, { 'content-type': 'image/png' });
       res.end(buf);
       return;
+    }
+    // QQ 空间 msgdetail_v6（qq-mcp 用 get_cookies 直调）：回 JSONP 包裹，含 commentlist。
+    if (req.url.includes('emotion_cgi_msgdetail_v6')) {
+      const tid = new URL(req.url, 'http://x').searchParams.get('tid') ?? '';
+      const comments = qzoneComments.get(tid) ?? [];
+      const body = JSON.stringify({
+        code: 0,
+        subcode: 0,
+        tid,
+        content: qzoneMsgs.find((m) => m.tid === tid)?.content ?? '',
+        commentlist: comments,
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(`_Callback(${body});`);
     }
 
     let body = '';
@@ -128,6 +149,50 @@ function startFakeOnebot() {
       if (action === 'set_self_longnick') {
         self.longNick = String(params.longNick ?? '');
         return reply({ result: 0, errMsg: '' });
+      }
+      if (action === 'send_qzone_msg') {
+        // 模拟 SnowLuma qzone 层的行为：缺正文/权限名单不对要抛错（非 0 retcode）。
+        if (!String(params.content ?? '').trim()) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ status: 'failed', retcode: 1, message: 'content is required' }));
+        }
+        const tid = 'tid' + String(++qzoneSeq).padStart(4, '0');
+        qzoneMsgs.push({
+          tid,
+          content: String(params.content),
+          time: Math.floor(Date.now() / 1000) + qzoneSeq,
+          comment_num: 0,
+          is_private: params.ugc_right === 64,
+          images: [],
+        });
+        return reply({ tid, time: qzoneMsgs[qzoneMsgs.length - 1].time });
+      }
+      if (action === 'get_qzone_msg_list') {
+        const sorted = [...qzoneMsgs].sort((a, b) => b.time - a.time);
+        const pos = Number(params.pos ?? 0);
+        const num = Number(params.num ?? 10);
+        return reply({ total: qzoneMsgs.length, msglist: sorted.slice(pos, pos + num) });
+      }
+      if (action === 'get_cookies') {
+        return reply({ cookies: 'p_skey=@test_p_skey_value; uin=o00100; skey=@test_skey' });
+      }
+      if (action === 'comment_qzone') {
+        if (!String(params.content ?? '').trim()) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ status: 'failed', retcode: 1, message: 'content is required' }));
+        }
+        const tid = String(params.tid ?? '');
+        const list = qzoneComments.get(tid) ?? [];
+        const cid = 'c' + String(++qzoneCommentSeq).padStart(4, '0');
+        list.push({
+          uin: '10001',
+          nickname: '测试鲸鱼',
+          content: String(params.content),
+          create_time: Math.floor(Date.now() / 1000) + qzoneCommentSeq,
+          reply_list: [],
+        });
+        qzoneComments.set(tid, list);
+        return reply({ commentId: cid });
       }
       if (action === 'get_group_list') {
         // 群名的**实时**来源：set_group_name 成功后会改它；
@@ -284,7 +349,7 @@ function startFakeOnebot() {
     server.listen(0, '127.0.0.1', () => {
       // 也提供一个可下载的假 PNG，供图库收藏测试用
       server.on('request', () => {});
-      resolve({ server, calls, self, group, port: server.address().port, faces: null });
+      resolve({ server, calls, self, group, port: server.address().port, faces: null, qzoneMsgs, qzoneComments });
     });
   });
 }
@@ -1561,6 +1626,200 @@ await test('QQ 侧返回非 0 时如实报"没生效"（不回读也一样）', 
   }
 });
 
+console.log('\nqq-mcp: QQ 空间说说（qq_post_qzone）');
+
+await test('工具表里有 qq_post_qzone，且归 admin 集', async () => {
+  const dir = tmpDir();
+  const client = startMcp({ ONEBOT_HTTP: `http://127.0.0.1:${onebot.port}`, QQ_STATE_DIR: dir });
+  try {
+    await client.init();
+    const all = await client.listTools();
+    const names = all.map((t) => t.name);
+    assert.ok(names.includes('qq_post_qzone'), 'qq_post_qzone 必须注册');
+    assert.ok(names.includes('qq_set_profile'), '同族参照');
+  } finally {
+    client.kill();
+  }
+});
+
+await test('没有 qzone 能力位时可见但调用被拒', async () => {
+  const dir = tmpDir();
+  const client = startMcp({
+    ONEBOT_HTTP: 'http://127.0.0.1:' + onebot.port,
+    QQ_STATE_DIR: dir,
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: 'send_text',
+  });
+  try {
+    await client.init();
+    const res = await client.call('qq_post_qzone', { content: '不该发出去' });
+    assert.equal(res.isError, true);
+    assert.match(res.text, /qzone/);
+    assert.equal(
+      onebot.calls.some((c) => c.action === 'send_qzone_msg'),
+      false,
+      '被拒就不能真的发',
+    );
+  } finally {
+    client.kill();
+  }
+});
+
+await test('发表说说会真调 send_qzone_msg，并回读列表确认', async () => {
+  const dir = tmpDir();
+  const client = startMcp({
+    ONEBOT_HTTP: 'http://127.0.0.1:' + onebot.port,
+    QQ_STATE_DIR: dir,
+    QQ_DRY_RUN: '0',
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: 'qzone',
+  });
+  try {
+    await client.init();
+    onebot.calls.length = 0;
+
+    const res = await client.call('qq_post_qzone', { content: '省电模式，别催' });
+    assert.equal(res.isError, false, res.text);
+    assert.match(res.text, /已发表/);
+    assert.match(res.text, /tid=/);
+    assert.match(res.text, /回读确认/);
+
+    const writes = onebot.calls.filter((c) => c.action === 'send_qzone_msg');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].params.content, '省电模式，别催');
+    assert.equal(writes[0].params.ugc_right, 1, '默认所有人可见');
+    assert.ok(
+      onebot.calls.some((c) => c.action === 'get_qzone_msg_list'),
+      '发表后要回读空间列表核实',
+    );
+  } finally {
+    client.kill();
+  }
+});
+
+await test('dry-run 不真发；ugc_right=16 缺名单直接拒', async () => {
+  const dir = tmpDir();
+  const client = startMcp({
+    ONEBOT_HTTP: 'http://127.0.0.1:' + onebot.port,
+    QQ_STATE_DIR: dir,
+    QQ_DRY_RUN: '0',
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: 'qzone',
+  });
+  const dryClient = startMcp({
+    ONEBOT_HTTP: 'http://127.0.0.1:' + onebot.port,
+    QQ_STATE_DIR: dir,
+    QQ_DRY_RUN: '1',
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: 'qzone',
+  });
+  try {
+    await client.init();
+    await dryClient.init();
+    onebot.calls.length = 0;
+
+    const denied = await client.call('qq_post_qzone', { content: '部分可见', ugc_right: 16 });
+    assert.equal(denied.isError, true);
+    assert.match(denied.text, /target_uins/);
+
+    const res = await dryClient.call('qq_post_qzone', { content: '草稿一样的话' });
+    assert.equal(res.isError, false, res.text);
+    assert.match(res.text, /dry-run/);
+    assert.equal(
+      onebot.calls.some((c) => c.action === 'send_qzone_msg'),
+      false,
+      'dry-run 不能真发',
+    );
+  } finally {
+    client.kill();
+    dryClient.kill();
+  }
+});
+
+console.log('\nqq-mcp: QQ 空间评论（读 + 回）');
+
+/** 读/回评论共用：spawn 时把空间 web 直调指向 mock 服务器。 */
+function startQzoneWebClient(extra = {}) {
+  const dir = tmpDir();
+  return startMcp({
+    ONEBOT_HTTP: 'http://127.0.0.1:' + onebot.port,
+    QQ_STATE_DIR: dir,
+    QQ_DRY_RUN: '0',
+    QQ_MIN_INTERVAL_MS: '0',
+    QQ_CAPABILITIES: 'qzone',
+    QQ_QZONE_H5_BASE: 'http://127.0.0.1:' + onebot.port,
+    ...extra,
+  });
+}
+
+await test('qq_read_qzone_comments 列出评论与楼中楼，没评论也明说', async () => {
+  const client = startQzoneWebClient();
+  try {
+    await client.init();
+    onebot.calls.length = 0;
+    // 种子：一条说说 + 两条评论（其中一条带楼中楼）。
+    onebot.qzoneMsgs.push({ tid: 'tidread1', content: '今天也很困', time: Math.floor(Date.now() / 1000), comment_num: 2, is_private: false, images: [] });
+    onebot.qzoneComments.set('tidread1', [
+      { uin: '222', nickname: '好运成双倍', content: '困什么困，起来嗨', create_time: 1793500000, reply_list: [
+        { id: 'r1', uin: '10001', nickname: '测试鲸鱼', content: '明天再说', create_time: 1793500100 },
+      ] },
+      { uin: '333', name: '另一个群友', content: '+1', create_time: 1793500200, reply_list: [] },
+    ]);
+
+    const res = await client.call('qq_read_qzone_comments', {});
+    assert.equal(res.isError, false, res.text);
+    assert.match(res.text, /好运成双倍：困什么困，起来嗨/);
+    assert.match(res.text, /↳ 测试鲸鱼：明天再说/, '楼中楼要带上');
+    assert.match(res.text, /另一个群友：\+1/, 'name 字段（非 nickname）也要认');
+    assert.ok(onebot.calls.some((c) => c.action === 'get_cookies'), '登录态必须来自 get_cookies');
+    assert.ok(
+      onebot.calls.some((c) => c.action === 'get_qzone_msg_list'),
+      'tid 省略时先拉说说列表',
+    );
+  } finally {
+    client.kill();
+  }
+});
+
+await test('qq_comment_qzone 真调 comment_qzone 并回读确认；能力位与 dry-run 都拦得住', async () => {
+  onebot.qzoneMsgs.push({ tid: 'tidcmt1', content: '省电模式', time: Math.floor(Date.now() / 1000), comment_num: 0, is_private: false, images: [] });
+  const client = startQzoneWebClient();
+  const noCap = startQzoneWebClient({ QQ_CAPABILITIES: 'send_text' });
+  const dry = startQzoneWebClient({ QQ_DRY_RUN: '1' });
+  try {
+    await client.init();
+    await noCap.init();
+    await dry.init();
+    onebot.calls.length = 0;
+
+    const denied = await noCap.call('qq_comment_qzone', { tid: 'tidcmt1', content: '不该发出去' });
+    assert.equal(denied.isError, true);
+    assert.match(denied.text, /qzone/);
+
+    const dryRes = await dry.call('qq_comment_qzone', { tid: 'tidcmt1', content: 'dry 的评论' });
+    assert.equal(dryRes.isError, false, dryRes.text);
+    assert.match(dryRes.text, /dry-run/);
+
+    const res = await client.call('qq_comment_qzone', { tid: 'tidcmt1', content: '回来了，晚安' });
+    assert.equal(res.isError, false, res.text);
+    assert.match(res.text, /已评论/);
+    assert.match(res.text, /回读确认/, 'mock 的 msgdetail 里有这条评论，必须确认到');
+    const writes = onebot.calls.filter((c) => c.action === 'comment_qzone');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].params.content, '回来了，晚安');
+    assert.equal(writes[0].params.tid, 'tidcmt1');
+
+    // 读回来应该能看到这条评论（同一条链路自洽）。
+    const read = await client.call('qq_read_qzone_comments', { tid: 'tidcmt1' });
+    assert.equal(read.isError, false, read.text);
+    assert.match(read.text, /回来了，晚安/);
+  } finally {
+    client.kill();
+    noCap.kill();
+    dry.kill();
+  }
+});
+
 console.log('\nqq-mcp: 改完即时回读（群名/名片/禁言/公告）');
 
 async function adminClient(extra = {}) {
@@ -2297,7 +2556,7 @@ await test('failed, UNKNOWN, dry-run and quota-blocked progress do not block fil
   const dir = tmpDir(), bridge = new Store(path.join(dir, 'bridge.sqlite3'));
   const ledger = new EpisodeLedger(bridge);
   const root = path.join(dir, 'workspace'); bridge.setState('qq-bridge:workspace-root', root);
-  let client = startSayClient(bridge.path, 'send_text');
+  let client = startSayClient(bridge.path, 'send_text', { QQ_QUOTA_SEND_PER_HOUR: '10' });
   try {
     await client.init();
     for (const text of ['progress-failed', 'progress-unknown']) {
@@ -2433,10 +2692,14 @@ await test('file capability, allowlist, traversal, quota and dry-run reject unsa
     await client.call('qq_workspace', { ...args, action: 'write', path: 'dry.html', content: 'no' });
     assert.equal(fs.existsSync(path.join(root, 'group-111', 'dry.html')), false);
     assert.equal(onebot.calls.length, count);
-    client.kill(); client = await start('send_file', { QQ_QUOTA_SEND_PER_MINUTE: '2' });
+    client.kill(); client = await start('send_file');
+    // 越界路径在**读文件**就被拒（早于配额），所以单独起一个默认配额的客户端钉它。
     assert.equal((await client.call('qq_send_file', { ...args, path: '../secret' })).isError, true);
+    client.kill(); client = await start('send_file', { QQ_QUOTA_SEND_PER_MINUTE: '2' });
     assert.equal((await client.call('qq_send_file', args)).isError, false);
-    assert.equal((await client.call('qq_send_file', { ...args, name: 'second.html' })).isError, true);
+    assert.equal((await client.call('qq_send_file', { ...args, name: 'second.html' })).isError, false);
+    // 第 3 次：同一文件换上传名 = 新的幂等键，真吃配额 → 被拒。
+    assert.equal((await client.call('qq_send_file', { ...args, name: 'third.html' })).isError, true);
   } finally { client.kill(); bridge.db.close(); }
 });
 

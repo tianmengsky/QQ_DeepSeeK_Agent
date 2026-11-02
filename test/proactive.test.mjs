@@ -25,6 +25,7 @@ import {
   engagementOf,
 } from '../lib/application/proactive.mjs';
 import { config } from './helpers/bridge.mjs';
+import { sendSelfMessage } from '../lib/delivery/self-send.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-proactive-'));
 const stores = [];
@@ -231,6 +232,36 @@ try {
     assert.equal(engagementOf([{ kind: 'group_message', createdAt: 500, payload: { qq: '111' } }], since), false);
   });
 
+  /**
+   * "有人接"必须有靶子：@ 她 / 引用她那句 / 她之后第一句没把话头递给别人。
+   * 原来只要她开口之后这个窗口里有别人说话就算"有人接"——那测的是群热不热闹。
+   */
+  await test('有人接话的三个靶子：@ 她、引用她、接着她说', () => {
+    const since = 1000, selfIds = ['100'];
+    const at = (createdAt, payload) => ({ kind: 'inbound', createdAt, payload });
+    // ① @ 她
+    assert.equal(engagementOf([at(2000, { qq: '111', mentions: ['100'] })], since, { selfIds }), true);
+    // ② 引用了她说的那一句（她那条在 since 上，也必须认得出来）
+    assert.equal(engagementOf([
+      { kind: 'self_message', createdAt: 1000, payload: { qq: '', messageId: '900' } },
+      at(2000, { qq: '111', replyToId: '900' }),
+    ], since, { selfIds }), true);
+    // ③ 她之后第一句，没 @ 别人也没引用别人 —— 就是接着她说
+    assert.equal(engagementOf([at(2000, { qq: '111', text: '对，我也这么想' })], since, { selfIds }), true);
+    // 别人之间的对话：@ 第三个人 / 引用第三个人的话 → 不算接她
+    assert.equal(engagementOf([at(2000, { qq: '111', mentions: ['222'] })], since, { selfIds }), false);
+    assert.equal(engagementOf([at(2000, { qq: '111', replyToId: '777' })], since, { selfIds }), false);
+    // 她自己接着说了两句，不构成"有人接"
+    assert.equal(engagementOf([
+      { kind: 'self_message', createdAt: 2000, payload: { qq: '100', messageId: '901' } },
+    ], since, { selfIds }), false);
+    // 系统事件（没有发送者）不算人说话
+    assert.equal(engagementOf([at(2000, { qq: '', text: '你被群主禁言10分钟' })], since, { selfIds }), false);
+    // 观察窗之外才有人说话：与她那句无关
+    assert.equal(engagementOf([at(900000, { qq: '111', text: '接着聊' })], since,
+      { selfIds, until: since + 600000 }), false);
+  });
+
   await test('没到点就不醒', async () => {
     const s = setup();
     const now = Date.now();
@@ -324,6 +355,93 @@ try {
     const byId = Object.fromEntries(rows.map((row) => [Number(row.id), row]));
     assert.equal(byId[Number(rowA)].outcome, 'replied');
     assert.equal(byId[Number(rowB)].outcome, 'quiet');
+  });
+
+  /**
+   * 脊柱那一行记的是 `self:account`（"她自己时间这一轮醒过"），那里永远没有别人说话。
+   *
+   * 线上 10 行里 3 行 `sent` 全被判「没人接」，其中两行明明有人在 11:15 / 12:01
+   * 回了她 —— 判据根本读错了地方。现在这类行记 `self`（不算账），真正的账记在
+   * 按目标补的 `kind='say'` 行上。
+   */
+  await test('她自己时间那一轮不判「没人接」，也不进今天的回应率', async () => {
+    const s = setup();
+    const now = Date.now();
+    const id = s.store.recordProactive({
+      conversation: 'self:account', kind: 'spine', trigger: 'self-time', text: '', status: 'sent',
+    });
+    const settled = await s.host.settle({ now: now + 20 * 60000 });
+    assert.equal(settled, 1);
+    assert.equal(s.proactive().find((row) => Number(row.id) === Number(id)).outcome, 'self');
+    const snap = proactiveSnapshot({ store: s.store, config: s.cfg, stats: {}, host: { enabled: true, runtime: {} } });
+    assert.equal(snap.today.quiet, 0, '自己的时间不能被算成"没人接"');
+    assert.equal(snap.today.selfTime, 1);
+  });
+
+  /**
+   * 补记的那一行必须用**她真正开口的时刻**：结算要拿它比"谁在这之后说过话"。
+   * 用记账时刻（回合结束后才写）会把中间那一分钟里别人的回应切到窗口外。
+   */
+  await test('开口那行的时刻是她说出口的时刻，之后几秒的回应算有人接', async () => {
+    const s = setup();
+    const now = Date.now();
+    const spokeAt = now - 20 * 60000;
+    const id = s.store.recordProactive({
+      conversation: 'user:200', kind: 'say', trigger: 'self-time', text: '', createdAt: spokeAt, status: 'sent',
+    });
+    // 她说完 3 秒后对方回了一句（旧写法里这一句会落在 since 之前）
+    s.store.recordEvent({
+      conversation: 'user:200', kind: 'inbound',
+      payload: { text: '嗯，听到了', who: '甲', qq: '200', messageId: 'r9' },
+      createdAt: spokeAt + 3000,
+    });
+    await s.host.settle({ now });
+    assert.equal(s.proactive().find((row) => Number(row.id) === Number(id)).outcome, 'replied');
+  });
+
+  /**
+   * 结算这一层也必须按"接她那句"判，而不只是"这个群有人说话"：
+   * 群里别人互相 @、互相引用，她那一句没人理，就是没人接。
+   */
+  await test('结算：群里别人互聊不算接她，@ 她或引用她才算', async () => {
+    const s = setup({ settings: { selfIds: ['100'] } });
+    const now = Date.now();
+    const spokeAt = now - 20 * 60000;
+    const ignored = s.store.recordProactive({
+      conversation: 'group:10', kind: 'say', trigger: 'self-time', text: '', createdAt: spokeAt, status: 'sent',
+    });
+    s.store.recordEvent({
+      conversation: 'group:10', kind: 'inbound',
+      payload: { qq: '111', who: '甲', text: '你在吗', mentions: ['222'], messageId: 'o1' },
+      createdAt: spokeAt + 60000,
+    });
+    const mentioned = s.store.recordProactive({
+      conversation: 'group:11', kind: 'say', trigger: 'self-time', text: '', createdAt: spokeAt, status: 'sent',
+    });
+    s.store.recordEvent({
+      conversation: 'group:11', kind: 'inbound',
+      payload: { qq: '111', who: '甲', text: '@你 这句我不同意', mentions: ['100'], messageId: 'o2' },
+      createdAt: spokeAt + 60000,
+    });
+    const quoted = s.store.recordProactive({
+      conversation: 'group:12', kind: 'say', trigger: 'self-time', text: '', createdAt: spokeAt, status: 'sent',
+    });
+    // 她那句话本身也在这个窗口里（和结算起点同一时刻），引用它必须认得出来
+    s.store.recordEvent({
+      conversation: 'group:12', kind: 'self_message',
+      payload: { qq: '', who: '你', text: '不过水母不发不行啊', messageId: '900' },
+      createdAt: spokeAt,
+    });
+    s.store.recordEvent({
+      conversation: 'group:12', kind: 'inbound',
+      payload: { qq: '111', who: '甲', text: '这个确实好看', replyToId: '900', messageId: 'o3' },
+      createdAt: spokeAt + 90000,
+    });
+    await s.host.settle({ now });
+    const outcome = (id) => s.proactive().find((row) => Number(row.id) === Number(id)).outcome;
+    assert.equal(outcome(ignored), 'quiet');
+    assert.equal(outcome(mentioned), 'replied');
+    assert.equal(outcome(quoted), 'replied');
   });
 
   await test('分享视频：一句自己的话 + 标题 + 完整链接，bvid 记进 shared', async () => {
@@ -431,6 +549,43 @@ try {
     const { AUX_LABELS } = await import('../lib/agent/aux-attribution.mjs');
     assert.equal(AUX_LABELS.proactive, '主动开口');
   });
+
+  /**
+   * 学习读数必须和真正做决定时用的那一份一致（`learningFor()`：90 天、按目标）。
+   * 曾经这里是拿"今天的行"算的：今天只发过一次 → 样本 <2 → factor 恒为 1，
+   * 面板永远显示 ×1，看起来她什么都没学到。
+   */
+  await test('快照的学习读数按目标、按 90 天历史算，且不把自己时间当目标', async () => {
+    const s = setup({ settings: { proactiveLearnWindow: 6 } });
+    const now = Date.now();
+    for (let i = 0; i < 3; i++) {
+      const id = s.store.recordProactive({ conversation: 'group:10', kind: 'say', trigger: 'self-time', text: '' });
+      s.store.finishProactiveCheck(id, 'quiet');
+    }
+    s.store.db.prepare("UPDATE proactive SET created_at = ? WHERE conversation = 'group:10'")
+      .run(now - 3 * 86400000);
+    s.store.recordProactive({ conversation: 'self:account', kind: 'spine', trigger: 'self-time', text: '', status: 'sent' });
+
+    const snap = proactiveSnapshot({ store: s.store, config: s.cfg, stats: {}, host: { enabled: true, runtime: {} } });
+    const group = snap.learn.find((item) => item.conversation === 'group:10');
+    assert.ok(group, '三天前的账也要出现在学习里，不能只看今天');
+    assert.equal(group.total, 3);
+    assert.equal(group.answered, 0);
+    assert.equal(group.factor, 0);
+    // v145 的语义：factor 0 不是"把人拉黑"，只是权重降到 0.05。
+    assert.equal(group.weight, 0.05);
+    assert.equal(snap.learn.some((item) => item.conversation === 'self:account'), false, '自己的时间不是"目标"');
+  });
+
+  await test('今日额度：0 是不限，快照用 null 表达（Infinity 过不了 JSON）', () => {
+    const s = setup();
+    const unlimited = proactiveSnapshot({ store: s.store, config: { proactiveDailyMax: 0 }, stats: {} });
+    assert.equal(unlimited.today.budget, null);
+    assert.equal(JSON.parse(JSON.stringify(unlimited)).today.budget, null);
+    const capped = proactiveSnapshot({ store: s.store, config: { proactiveDailyMax: 3 }, stats: {} });
+    assert.equal(capped.today.budget, 3);
+  });
+
   await test('真回合模式：睡着的时候不醒，也不花一次调用', async () => {
     const hour = new Date().getHours();
     const s = setup({ settings: { proactiveMode: 'turn', proactiveSleepFrom: hour, proactiveSleepTo: (hour + 1) % 24 } });
@@ -541,6 +696,46 @@ try {
     };
     assert.equal(admitMessage(cfg, { ...base, __selfTurn: true }), true, '场景标记要放行');
     assert.equal(admitMessage(cfg, base), false, '她自己账号的正常消息不能当成新消息');
+  });
+
+  /**
+   * 2026-11-01 线上（群 1033440455，13:27）：她把自己时间里要说的两句话用空行
+   * 连在一条 message 里发出去，群里就是一个大气泡两截话。回复通道有『』拆条 +
+   * 按字数停顿，这条通道却把整段原样倒出去——同一个她，说话的形状不该有两套。
+   */
+  await test('自己时间里说话：空行分开的两段发成两条消息', async () => {
+    const s = setup({ settings: { bubbleDelayPerCharMs: 0 } });
+    quietFor(s.store, 'group:11', 3);
+    const sent = fakeNet();
+    const out = await sendSelfMessage({
+      ctx: s.ctx, config: s.cfg, store: s.store, registry: s.registry,
+      state: { ...s.state, proactive: s.host },
+      conversation: 'group:11',
+      text: '我还在呢\n\n你上午说的那个是怎么个紫法啊？',
+      idemKey: 'bubble:1',
+    });
+    assert.equal(out.sent, true);
+    assert.equal(out.bubbles, 2);
+    assert.deepEqual(sent.map((call) => call.params.message[0].data.text),
+      ['我还在呢', '你上午说的那个是怎么个紫法啊？']);
+    // 写回窗口的也必须是两条，而不是一条带空行的
+    const mine = s.rows('group:11', 'self_message');
+    assert.equal(mine.length, 2);
+    assert.ok(mine.every((row) => !String(JSON.parse(row.payload).text ?? '').includes('\n')));
+  });
+
+  await test('自己时间里说话：一句话就是一条消息，不会被拆', async () => {
+    const s = setup({ settings: { bubbleDelayPerCharMs: 0 } });
+    quietFor(s.store, 'group:11', 3);
+    const sent = fakeNet();
+    const out = await sendSelfMessage({
+      ctx: s.ctx, config: s.cfg, store: s.store, registry: s.registry,
+      state: { ...s.state, proactive: s.host },
+      conversation: 'group:11', text: '刚刷到个水母，好看得不像话', idemKey: 'bubble:2',
+    });
+    assert.equal(out.sent, true);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].params.message[0].data.text, '刚刷到个水母，好看得不像话');
   });
 
 } finally {

@@ -3,7 +3,7 @@
  *
  * 钉的是行为：
  *   · 把各窗口的动静压成几行，安静多久、她最后一次说话是什么时候；
- *   · 带上她最近做过的事、此刻的心情、自己写下的想法；
+ *   · 带上她最近做过的事、自己写下的想法；
  *   · 什么都没有时不凭空造热闹；超预算会截断（快照不能挤掉回合本身）。
  */
 import assert from 'node:assert/strict';
@@ -12,7 +12,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../lib/store.mjs';
 import { MemoryStore } from '../lib/memory/memory-store.mjs';
-import { writeMood } from '../lib/memory/mood.mjs';
 import { buildWorldSnapshot } from '../lib/application/world-snapshot.mjs';
 import { config } from './helpers/bridge.mjs';
 
@@ -59,19 +58,22 @@ try {
     assert.match(text, /你还没在那边说过话/u);
   });
 
-  await test('带上她做过的事、心情与自己写下的想法', () => {
+  await test('带上她做过的事与自己写下的想法', () => {
     const s = setup();
     s.store.upsertConversation('group:10', { lastMessageAt: hoursAgo(s.now, 1) });
     const id = s.store.recordProactive({ conversation: 'group:10', kind: 'speak', text: '在吗', idemKey: 'p1' });
     s.store.finishProactiveCheck(id, 'quiet');
-    writeMood(s.store, { text: '有点闷，那个群后来没人接我的话。', source: 'test' });
     s.memory.agent.write({ subject: 'self', slot: 'me.stance.floor', version: 0, kind: 'stance',
       visibility: 'public', period: '2026-11-01', text: '被夸的时候先装没听懂。',
       sources: [{ conversation: 'self:seed', messageId: 'seed:me.stance.floor', qq: '', who: '', at: s.now }] });
     const text = buildWorldSnapshot({ store: s.store, memory: s.memory, now: s.now });
     assert.match(text, /你最近自己做过的事/u);
-    assert.match(text, /说了一句话（没人接）/u);
-    assert.match(text, /你此刻的心情/u);
+    assert.match(text, /说了一句话/u);
+    // 只写"做过什么"，不写"有没有人接"：接没接她自己去看那个窗口。
+    const deeds = text.split('【你最近自己做过的事】')[1]?.split('\n\n【')[0] ?? '';
+    assert.ok(deeds.length > 0, '应该有这一段');
+    assert.doesNotMatch(deeds, /有人接了|没人接|还没回音/u);
+    assert.doesNotMatch(text, /你此刻的心情/u);
     assert.match(text, /被夸的时候先装没听懂/u);
   });
 

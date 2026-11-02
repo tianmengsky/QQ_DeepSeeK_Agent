@@ -140,6 +140,7 @@ function fakeSessionController(replyText = '干嘛呀') {
 
 function fakeCtx(sessionController) {
   const routes = [];
+  const listeners = new Map();
   const ctx = {
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     /**
@@ -154,6 +155,15 @@ function fakeCtx(sessionController) {
     sessionController,
     get: (name) => (name === 'sessionController' ? sessionController : undefined),
     webServer: { register: (route) => routes.push(route) },
+    // onebot.mjs 的 createHandler 会订阅 `qq-bridge:external-message`（B 站入口），
+    // 假 ctx 缺 `on` 会让整套直接炸在注册阶段——这个坑曾经被 --fast 跳过
+    // poke-wake 而长期没暴露。
+    on: (name, fn) => {
+      listeners.set(name, [...(listeners.get(name) ?? []), fn]);
+    },
+    emit: (name, payload) => {
+      for (const fn of listeners.get(name) ?? []) fn(payload);
+    },
     effect: (fn) => {
       const d = fn();
       return typeof d === 'function' ? d : () => {};

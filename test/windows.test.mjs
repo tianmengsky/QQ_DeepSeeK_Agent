@@ -93,6 +93,18 @@ try {
     assert.match(out.text, /‹上文›.*另一个群在约五子棋/u);
   });
 
+  await test('工具输出是无损 JSON：不能有 undefined 值的字段', async () => {
+    // 2026-11-01 线上实测：mine 不带 query 时 `query: query || undefined` 把
+    // undefined 塞进了返回值，DSH 无损校验直接拒收（value is not lossless JSON）。
+    const r = rig(); r.seed();
+    for (const args of [{ action: 'list' }, { action: 'mine' },
+      { action: 'search', query: '五子棋' }, { action: 'read', conversation: 'group:11' }]) {
+      const out = await r.call(args);
+      for (const [key, value] of Object.entries(out))
+        assert.notEqual(value, undefined, `${args.action} 的字段 ${key} 是 undefined，DSH 会拒收`);
+    }
+  });
+
   await test('search 跨窗口找关键词，不越白名单', async () => {
     const r = rig(); r.seed();
     const hit = await r.call({ action: 'search', query: '五子棋', days: 1 });
@@ -163,8 +175,10 @@ try {
     await assert.rejects(() => r.call({ action: 'list' }, 'session-b'), /来源无效|不属于/);
   });
 
-  await test('输出按 crossWindowMaxChars 截断，并说明还剩多少', async () => {
-    // 下限 600：再小就只剩一行，不如让她换个范围查。
+  await test('read 有自己的预算：配成 600 字也不会把"最近 N 条"掐成几十行', async () => {
+    // 2026-11-01（用户）：「read 改成看见那个群/私聊的最近 100 条对话记录」。
+    // 她的 100 条常常上万字，共用 crossWindowMaxChars（默认 3000）时读到六七十行就断，
+    // 于是"读 100 条"名不副实 —— 那次她正是因此看不到 11:12 的原话。
     const r = rig({ crossWindowMaxChars: 600 }); r.seed();
     const alias = /- (w\d+) 群「棋友群」/u.exec((await r.call({ action: 'list' })).text)?.[1];
     assert.ok(alias, '棋友群应有编号');
@@ -172,6 +186,40 @@ try {
       r.store.recordEvent({ conversation: 'group:11', kind: 'inbound',
         payload: { qq: '200', who: '甲', text: '这是一条比较长的聊天内容用于把预算撑满' + i, at: Date.now() + i, messageId: 'x' + i } });
     const out = await r.call({ action: 'read', conversation: alias, limit: 100 });
+    assert.ok(out.text.split('\n').length > 50, '600 字配置不该把 read 掐到几十行');
+    assert.ok(out.text.includes('把预算撑满59'), '最后一条也要读得到');
+    assert.ok(!/还有 \d+ 项没显示/u.test(out.text), '100 条以内不该提前截断');
+  });
+
+  await test('同一条消息在库里存了两份时，read 只显示一行', async () => {
+    // 2026-11-01 线上：发送时记一份（who='你'），OneBot 回显又记一份（who=她的昵称），
+    // 两个 dedupe_key 不同，写的时候拦不住。她那 40 条里 24 条是 self_message，
+    // 实际只说了十二三句——读自己的历史一半是重影。
+    const r = rig(); r.seed();
+    const alias = /- (w\d+) 群「棋友群」/u.exec((await r.call({ action: 'list' })).text)?.[1];
+    const at = Date.now();
+    r.store.recordEvent({ conversation: 'group:11', kind: 'self_message',
+      payload: { text: '这句我说过', who: '你', qq: '', messageId: 'dup-1', at, timeSource: 'sent' } });
+    r.store.recordEvent({ conversation: 'group:11', kind: 'self_message',
+      payload: { text: '这句我说过', who: 'DeepSeek大肥鱼', qq: '100', messageId: 'dup-1', at, timeSource: 'qq' } });
+    const out = await r.call({ action: 'read', conversation: alias });
+    assert.equal((out.text.match(/这句我说过/gu) ?? []).length, 1, '同一条消息只该出现一次');
+  });
+
+  await test('read 末尾说清边界：这是最近 N 条，更早的用 search', async () => {
+    const r = rig(); r.seed();
+    const alias = /- (w\d+) 群「棋友群」/u.exec((await r.call({ action: 'list' })).text)?.[1];
+    const out = await r.call({ action: 'read', conversation: alias });
+    assert.match(out.text, /这是最近的 \d+ 条/u);
+    assert.match(out.text, /action=search/u, '不告诉她就会把"读到的这些"当成"这群全部"');
+  });
+
+  await test('别的动作仍按 crossWindowMaxChars 截断，并说明还剩多少', async () => {
+    const r = rig({ crossWindowMaxChars: 600 }); r.seed();
+    for (let i = 0; i < 60; i++)
+      r.store.recordEvent({ conversation: 'group:11', kind: 'inbound',
+        payload: { qq: '200', who: '甲', text: '这是一条比较长的聊天内容用于把预算撑满' + i, at: Date.now() + i, messageId: 'x' + i } });
+    const out = await r.call({ action: 'search', query: '把预算撑满' });
     assert.ok(out.text.length <= 700, '600 字上限允许多一点点尾巴');
     assert.match(out.text, /还有 \d+ 项没显示/);
   });
@@ -197,6 +245,32 @@ try {
     assert.equal(r.sent.length, 0, '被拦下的不该发出去');
   });
 
+  await test('say 不许对着当前窗口：那是 qq_say 的地盘', async () => {
+    // 唯一的真重叠处（2026-11-01）：qq_say=眼前（绑定本轮归属、走 outbox），
+    // windows say=别处（跨窗口）。对着 here 转 windows 会同一句话走两套账。
+    const r = rig(); r.seed();
+    await assert.rejects(() => r.call({ action: 'say', to: 'group:10', text: '对着眼前说' }), /不用转 windows/);
+    assert.equal(r.sent.length, 0);
+  });
+
+  await test('编号账本扛得住重载：新工具实例认得她历史里的旧编号', async () => {
+    // 2026-11-01 线上教训：账本原来只在内存，桥接一重载就清空，而她的 DSH 会话
+    // 历史里还留着旧编号——按记忆调用全部落空（19:18 两次 read 报错）。
+    // 账本落 SQLite 后，重载（新工具实例、同一个 Session 和库）应当无缝续用。
+    const r = rig(); r.seed();
+    const alias = /- (w\d+) 群「棋友群」/u.exec((await r.call({ action: 'list' })).text)?.[1];
+    assert.ok(alias, 'list 应给得出编号');
+    const reloaded = windowsTool({
+      store: r.store, config: r.cfg,
+      state: { enabled: true, disposed: false, sourceLedger: r.ledger },
+      registry: r.registry, send: async () => ({ sent: true, status: 'SUCCEEDED' }),
+    });
+    const out = await reloaded.execute({ action: 'read', conversation: alias, limit: 5 },
+      { agent: { session: { id: 'session-a' } }, signal: new AbortController().signal });
+    assert.equal(out.status, 'READ', '重载后旧编号应仍然有效');
+    assert.match(out.text, /另一个群在约五子棋/);
+  });
+
   await test('托管关掉时不读（不会在停摆期间继续翻库）', async () => {
     const r = rig(); r.seed();
     // 直接改 state 模拟停摆。
@@ -219,6 +293,23 @@ try {
     assert.match(out.text, /你此刻不在任何房间里/u);
     assert.match(out.text, /棋友群/u);
     assert.doesNotMatch(out.text, /group:11/u);
+  });
+  await test('她自己的时间里没有嘴：say 被拒并指向派遣', async () => {
+    // 2026-11-01 派遣架构：脊柱只负责想，说话也派。提示词教了，工具必须认账，
+    // 否则她就退回隔空 say 的老路（线上两轮都是这么走的）。
+    const r = rig(); r.seed();
+    const origin = r.ledger.origin('self:account',
+      { qq: '999', who: '时间', messageId: 'self-turn:2', text: '[自主时间] 现在没有新消息。', at: Date.now() });
+    publishTurnSession(r.store, 'session-self', { conversation: 'self:account', sourceRef: origin });
+    r.registry.byKey.set('self:account', { sessionId: 'session-self' });
+    const list = await r.call({ action: 'list' }, 'session-self');
+    const alias = /- (w\d+) /.exec(list.text)?.[1];
+    assert.ok(alias, 'list 应该给得出编号');
+    await assert.rejects(() => r.call({ action: 'say', to: alias, text: '忽然想起你们' }, 'session-self'),
+      /没有嘴/, '脊柱来源的 say 必须被拒');
+    // 读不受影响：看属于想，不用派。
+    const read = await r.call({ action: 'read', conversation: alias }, 'session-self');
+    assert.equal(read.status, 'READ');
   });
 } finally {
   for (const store of stores) { try { store.close(); } catch {} }

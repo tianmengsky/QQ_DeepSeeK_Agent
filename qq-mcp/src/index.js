@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { onebotCall } from '../../lib/transport/onebot-client.mjs';
 import { loadImagePart } from '../../lib/transport/media.mjs';
+import { fetchQzoneMsgDetail, extractQzoneComments } from './qzone-web.mjs';
 import { readImageCatalog, imageCatalogSummary, recordImageRead } from '../../lib/agent/image-catalog.mjs';
 import { nodeContent, forwardNodeImages } from '../../lib/prompt/forward.mjs';
 import { recordSpeech } from '../../lib/conversation/activity.mjs';
 import { EpisodeLedger } from '../../lib/memory/episodes.mjs';
 import { CHAT_TOOLS, ADMIN_TOOLS } from '../../lib/agent/tool-sets.mjs';
-import { extractAtMentions, atMarkerTokens, literalAtTarget } from '../../lib/domain/reply-policy.mjs';
+import { extractAtMentions, atMarkerTokens, literalAtTarget, extractQuoteTarget } from '../../lib/domain/reply-policy.mjs';
 import { workspaceRoot, WORKSPACE_STATE_KEY, workspaceAction, readWorkspaceFile, snapshotFile, fileName } from '../../lib/agent/workspace.mjs';
 import { VOICE_LIBRARY_STATE_KEY, voiceLibraryRoot, loadVoiceLibrary, matchClip, resolveClip, formatDuration } from '../../lib/agent/voice-library.mjs';
 import { recordFileProgress } from '../../lib/agent/file-progress.mjs';
@@ -51,6 +52,18 @@ const MAX_NOTICE_CHARS = Number(process.env.QQ_MAX_NOTICE_CHARS ?? 1000);
 /** 个性签名上限。QQ 侧大概 100 多字，收在 80 更安全。 */
 const MAX_LONG_NICK_CHARS = Number(process.env.QQ_MAX_LONG_NICK_CHARS ?? 80);
 /**
+ * 说说正文上限。QQ 空间说说没有公开的硬上限（实际能发很长），
+ * 但发出去的是"贴在空间里给所有人看的"，收在 2000 与聊天消息同一档；
+ * 真要写长的再说（env 可调）。
+ */
+const MAX_QZONE_CHARS = Number(process.env.QQ_MAX_QZONE_CHARS ?? 2000);
+/** QQ 空间单条说说最多 9 张图，这是 QQ 侧的硬限制，不要赌。 */
+const MAX_QZONE_IMAGES = 9;
+/**
+ * 空间评论正文上限。评论比说说短得多，收在 500；env 可调。
+ */
+const MAX_QZONE_COMMENT_CHARS = Number(process.env.QQ_MAX_QZONE_COMMENT_CHARS ?? 500);
+/**
  * QQ 内置 AI 语音的文本上限。
  *
  * QQ 没公开这个限制，也不保证长文本能合成；语音本来就是"一两句"的媒介，
@@ -94,6 +107,10 @@ const CAPABILITY_KEYS = [
   // 改**自己的**账号资料（昵称/个性签名）。和 manage_group 分开：
   // 它的作用域是整个账号（所有好友、所有群都会看到），不是某一个群。
   'set_profile',
+  // 发 QQ 空间说说（qq_post_qzone）。和 set_profile 分开：签名是"来找我的人看到"，
+  // 说是是贴在空间动态里对（按可见范围）所有人可见的公开内容，还带时间戳留在那。
+  // 一期只有"发"：删除/改权限/点赞评论是二期（SnowLuma 侧 action 都有，先不暴露）。
+  'qzone',
   // 戳一戳单独一位：它对别人是"打扰"，和发消息的语义不同
   'poke',
   // "查看申请"和"处理申请"**必须分开**：
@@ -152,26 +169,36 @@ const ALLOW_USERS = parseIdSet(process.env.QQ_ALLOW_USERS);
  */
 const CAPABILITIES = parseCapabilities(process.env.QQ_CAPABILITIES);
 
-/** 配额：窗口 -> 上限。0 = 不限制。 */
+/**
+ * 配额：窗口 -> 上限。0 = 不限制。
+ *
+ * 2026-11-01 用户拍板「取消全部的限流」：所有默认值改为 0（不限），与主动频率
+ * 同一条规矩——非用户当场要求，不许设限。要限必须显式设 QQ_QUOTA_* > 0，
+ * 并在 README/AGENTS.md 写明理由。能力位（QQ_CAPABILITIES）不是限流，是权限，另算。
+ */
 const QUOTA = {
-  sendPerMinute: Number(process.env.QQ_QUOTA_SEND_PER_MINUTE ?? 20),
-  sendPerHour: Number(process.env.QQ_QUOTA_SEND_PER_HOUR ?? 600),
-  imagePerHour: Number(process.env.QQ_QUOTA_IMAGE_PER_HOUR ?? 60),
-  favoriteReadPerHour: Number(process.env.QQ_QUOTA_FAVORITE_READ_PER_HOUR ?? 12),
-  // 管理类动作单独限流：它们对**别人**生效，误操作代价比发错一句话大
-  adminPerMinute: Number(process.env.QQ_QUOTA_ADMIN_PER_MINUTE ?? 6),
-  // 群公告：一发就推给全群，比禁言/改名更"响"，单独再收一道小时闸
-  noticePerHour: Number(process.env.QQ_QUOTA_NOTICE_PER_HOUR ?? 6),
-  // 改自己的账号资料（昵称/签名）：账号级身份，好友和所有群都看得到；QQ 侧还有
-  // 频率限制与内容审核，反复改容易被限，所以按天收得很紧。
-  profilePerDay: Number(process.env.QQ_QUOTA_PROFILE_PER_DAY ?? 3),
-  // 表情回应：轻量但仍对别人可见，别让它变成刷屏
-  reactPerMinute: Number(process.env.QQ_QUOTA_REACT_PER_MINUTE ?? 10),
-  // 语音（AI 合成与语音库）默认**不限**：点歌/念一段是低频动作，而限流只会让
-  // "答应了却发不出去"。要收就显式设 QQ_QUOTA_VOICE_PER_HOUR > 0。
+  sendPerMinute: Number(process.env.QQ_QUOTA_SEND_PER_MINUTE ?? 0),
+  sendPerHour: Number(process.env.QQ_QUOTA_SEND_PER_HOUR ?? 0),
+  imagePerHour: Number(process.env.QQ_QUOTA_IMAGE_PER_HOUR ?? 0),
+  favoriteReadPerHour: Number(process.env.QQ_QUOTA_FAVORITE_READ_PER_HOUR ?? 0),
+  // 管理类动作（禁言/踢人/改名/公告/处理申请）
+  adminPerMinute: Number(process.env.QQ_QUOTA_ADMIN_PER_MINUTE ?? 0),
+  // 群公告：一发推给全群
+  noticePerHour: Number(process.env.QQ_QUOTA_NOTICE_PER_HOUR ?? 0),
+  // 改自己的账号资料（昵称/签名）；QQ 侧自身还有频率限制与内容审核
+  profilePerDay: Number(process.env.QQ_QUOTA_PROFILE_PER_DAY ?? 0),
+  // 发说说（QQ 空间）；QQ 空间侧自身有风控，默认不限
+  qzonePerDay: Number(process.env.QQ_QUOTA_QZONE_PER_DAY ?? 0),
+  // 空间评论（回复留言）；同样默认不限
+  qzoneCommentPerDay: Number(process.env.QQ_QUOTA_QZONE_COMMENT_PER_DAY ?? 0),
+  // 读空间评论（每轮最多 5 次 msgdetail 直调，默认仍不限，只记账）
+  qzoneReadPerDay: Number(process.env.QQ_QUOTA_QZONE_READ_PER_DAY ?? 0),
+  // 表情回应
+  reactPerMinute: Number(process.env.QQ_QUOTA_REACT_PER_MINUTE ?? 0),
+  // 语音（AI 合成与语音库）默认**不限**
   voicePerHour: Number(process.env.QQ_QUOTA_VOICE_PER_HOUR ?? 0),
-  // 群资料读取（公告/精华/历史）会拉不少文本进上下文，单独限
-  groupInfoPerHour: Number(process.env.QQ_QUOTA_GROUP_INFO_PER_HOUR ?? 30),
+  // 群资料读取（公告/精华/历史）
+  groupInfoPerHour: Number(process.env.QQ_QUOTA_GROUP_INFO_PER_HOUR ?? 0),
 };
 
 /**
@@ -762,6 +789,7 @@ async function customFaceSheetEntries() {
 
 const MESSAGE_PARAM_DESC = [
   '字符串为纯文本/CQ码，数组为 OneBot 消息段。示范：[{"type":"face","data":{"id":"181"}}]；[{"type":"at","data":{"qq":"10001"}},{"type":"text","data":{"text":" 你好"}}]。仓库图片用 qq_send_sticker。',
+  '一条 message 就是对方那里的一屏（一个气泡）：想连着说两句就调两次，不要用空行在一条里堆两段话；分享链接时标题和网址留在同一条里。',
 ].join('\n');
 
 const IDEM_PARAM = {
@@ -1250,6 +1278,75 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // ---- QQ 空间说说 --------------------------------------------------------
+  {
+    name: 'qq_post_qzone',
+    description:
+      '在自己的 QQ 空间发表一条说说。content 必填；images 可选（最多 9 张，file:// http:// base64:// 自动上传）；' +
+      'ugc_right 可选查看权限（1=所有人可见默认，4=好友可见，64=仅自己可见）。返回说说 tid。' +
+      '删除/改已发说说是一期没有的能力，发之前想清楚。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: '说说正文' },
+        images: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '图片数组（可选，最多 9 张）：file:// / http:// / base64://，协议端自动上传',
+        },
+        ugc_right: {
+          type: 'integer',
+          enum: [1, 4, 16, 64, 128],
+          description: '查看权限：1=所有人可见（默认），4=好友可见，16=部分好友可见，64=仅自己可见，128=部分好友不可见',
+        },
+        target_uins: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: '权限作用 QQ 号数组；仅 ugc_right=16（可见名单）或 128（不可见名单）时必填',
+        },
+      },
+      required: ['content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'qq_read_qzone_comments',
+    description:
+      '看自己 QQ 空间说说下的评论（含楼中楼回复）。tid 省略=最新几条说说都看一遍；' +
+      '想知道"有没有人留言、留言说了什么"就用它。看完想回，用 qq_comment_qzone。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tid: { type: 'string', description: '只看这一条说说（tid 来自发说说回执或 qq_post_qzone 的记录）；省略则看最新 count 条' },
+        count: { type: 'integer', description: 'tid 省略时看最新几条（默认 3，上限 5）' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'qq_comment_qzone',
+    description:
+      '评论/回复一条说说（自己空间或好友空间的都行）。tid 必填；评论好友的说说时传 target_uin。' +
+      '发的是新的一级评论；楼中楼里"回复某人"一期不支持。返回评论 id（尽力而为）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tid: { type: 'string', description: '要评论的说说 tid' },
+        content: { type: 'string', description: '评论内容' },
+        target_uin: {
+          anyOf: [{ type: 'integer' }, { type: 'string' }],
+          description: '说说所属 QQ 号；评论好友空间的说说时必传，省略=自己的空间',
+        },
+        images: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '图片数组（可选，file:// http:// base64://，协议端自动上传）',
+        },
+      },
+      required: ['tid', 'content'],
+      additionalProperties: false,
+    },
+  },
   // ---- 表情回应 ----------------------------------------------------------
   {
     name: 'qq_react',
@@ -1462,13 +1559,22 @@ async function resolveAtTargets(tokens, groupId) {
  * 出站消息的最后一道加工：字符串里的 @ 标记 → at 段。
  *
  * 没有标记时**原样返回**（绝大多数情况），不改变既有行为。
+ *
+ * 2026-11-02：这里的"有没有标记"以前写的是 `message.includes('[@')`，
+ * 而主正则容忍方括号里的空格。线上因此漏过一次 `[ @好运成双倍 ]` ——
+ * 标记既没变成 at 段、也没被摘掉，原样进了群。判据和主正则同源。
+ *
+ * 引用标记（`[引用:ID]`）在这条通道上**只摘不挂**：reply 段指向的消息
+ * 必须先校验在同会话里存在，否则 OneBot 会把整条消息退回；这里拿不到
+ * 窗口，所以只保证语法不漏进群。真正要引用走最终正文（桥接会校验）。
  */
 async function applyAtMarkers(message, kind, id) {
-  if (typeof message !== 'string' || !message.includes('[@'))
+  if (typeof message !== 'string' || !/\[\s*@|\[\s*(?:引用|回复|quote|reply)\b/iu.test(message))
     return { message, text: message, mentions: [] };
-  const tokens = atMarkerTokens(message);
+  const withoutQuote = extractQuoteTarget(message, { allow: () => false }).text;
+  const tokens = atMarkerTokens(withoutQuote);
   const resolved = tokens.length ? await resolveAtTargets(tokens, kind === 'group' ? id : null) : new Map();
-  const at = extractAtMentions(message, {
+  const at = extractAtMentions(withoutQuote, {
     resolve: (token) => resolved.get(token) ?? null,
     selfIds: [await selfQq()].filter(Boolean),
     allow: kind === 'group',
@@ -1957,6 +2063,8 @@ const MUTATING_TOOLS = new Set([
   'qq_handle_add_request',
   'qq_manage_group',
   'qq_set_profile',
+  'qq_post_qzone',
+  'qq_comment_qzone',
   'qq_set_msg_emoji_like',
   'qq_react',
   'qq_request_kick',
@@ -3047,6 +3155,211 @@ async function handle(name, args = {}) {
       return ok(
         `⚠️ 改**没生效**：${want.join('、')} 提交了，但回读发现 ${bad.join('、')}。\n` +
           `（${why}。别当成改好了，可以稍后再试，或让对方到 QQ 客户端里确认。）`,
+      );
+    }
+
+    // ------------------------------------------------ QQ 空间说说
+
+    case 'qq_post_qzone': {
+      assertCapability('qzone');
+      const content = String(args.content ?? '').trim();
+      if (!content) {
+        throw new Error('content 不能为空：说说正文必填（空说说 QQ 空间也不收）。');
+      }
+      if (content.length > MAX_QZONE_CHARS) {
+        throw new Error(`说说正文太长：${content.length} 字，上限 ${MAX_QZONE_CHARS}（QQ_MAX_QZONE_CHARS 可调）。`);
+      }
+      const images = args.images ?? [];
+      if (!Array.isArray(images)) {
+        throw new Error('images 必须是字符串数组（file:// http:// base64://，协议端自动上传）。');
+      }
+      if (images.length > MAX_QZONE_IMAGES) {
+        throw new Error(`图片太多：${images.length} 张，QQ 空间单条说说上限 ${MAX_QZONE_IMAGES} 张。`);
+      }
+      for (const img of images) {
+        if (typeof img !== 'string' || !img.trim()) {
+          throw new Error('images 里每一项都得是非空字符串（file:// http:// base64://）。');
+        }
+      }
+      const ugcRight = args.ugc_right === undefined ? 1 : Number(args.ugc_right);
+      if (!Number.isInteger(ugcRight) || ![1, 4, 16, 64, 128].includes(ugcRight)) {
+        throw new Error(
+          `ugc_right 只认 1（所有人）/4（好友）/16（部分好友）/64（仅自己）/128（部分好友不可见），收到 ${args.ugc_right}。`,
+        );
+      }
+      const targetUins = args.target_uins ?? [];
+      if (!Array.isArray(targetUins) || targetUins.some((n) => !Number.isInteger(n) || n <= 0)) {
+        throw new Error('target_uins 必须是正整数 QQ 号数组。');
+      }
+      if ((ugcRight === 16 || ugcRight === 128) && !targetUins.length) {
+        throw new Error('ugc_right=16/128 时必须给 target_uins（可见/不可见名单），否则改用 1 或 4。');
+      }
+      if (ugcRight !== 16 && ugcRight !== 128 && targetUins.length) {
+        throw new Error('target_uins 只在 ugc_right=16/128 时生效；其他可见范围不需要它，别传。');
+      }
+
+      // 失败也算一次 —— 和别处同一原则，免得反复失败绕过限额。
+      consumeQuota('mcp:qzone:d', 24 * 3600_000, QUOTA.qzonePerDay, '发说说每天');
+
+      if (DRY_RUN) {
+        return ok(
+          `[dry-run] 未真实发表说说：${content.slice(0, 80)}${content.length > 80 ? '…' : ''}` +
+            `${images.length ? `（带 ${images.length} 张图）` : ''}，可见范围 ugc_right=${ugcRight}。`,
+        );
+      }
+
+      /**
+       * 发表。
+       *
+       * 和 set_profile 不同：SnowLuma 的 qzone 层**自己会校验错误** ——
+       * 非 0 code 或响应缺 tid 都直接抛错，所以"没抛"基本等于"发出去了"，
+       * 返回 { tid, time }。回读仍做一次（尽力而为）：空间列表最新一条
+       * 对上 tid 才说"回读确认"，读不到就说清楚没核实，不装。
+       */
+      const payload = { content, ugc_right: ugcRight };
+      if (images.length) payload.images = images.map((img) => img.trim());
+      if (ugcRight === 16 || ugcRight === 128) payload.target_uins = targetUins;
+      const published = await onebot('send_qzone_msg', payload);
+      const tid = published?.tid ? String(published.tid) : null;
+
+      let readBack = null;
+      try {
+        readBack = await onebot('get_qzone_msg_list', { num: 1, pos: 0 });
+      } catch (error) {
+        log(`⚠ 回读说说列表失败：${error?.message ?? error}`);
+      }
+      const newest = readBack?.msglist?.[0] ?? null;
+      const confirmed = Boolean(tid && newest?.tid === tid);
+
+      const scope = ugcRight === 1 ? '所有人可见' : ugcRight === 4 ? '好友可见' : `可见权限 ugc_right=${ugcRight}`;
+      if (confirmed) {
+        return ok(
+          `已发表说说（${scope}），tid=${tid}。\n` +
+            `（回读确认：空间最新一条就是它${images.length ? `，带 ${images.length} 张图` : ''}。）`,
+        );
+      }
+      return ok(
+        `已提交说说（${scope}），tid=${tid ?? '（协议端没回 tid）'}。${unverified('空间列表')}${
+          newest && newest.tid !== tid ? `回读到的最新一条 tid=${newest.tid}，与返回值对不上——可稍后用 QQ 客户端确认。` : ''
+        }`,
+      );
+    }
+
+    // ------------------------------------------------ QQ 空间评论（读 + 回）
+
+    case 'qq_read_qzone_comments': {
+      assertCapability('qzone');
+      consumeQuota('mcp:qzoneread:d', 24 * 3600_000, QUOTA.qzoneReadPerDay, '读空间评论每天');
+      const count = Math.max(1, Math.min(5, Number(args.count ?? 3) || 3));
+      // 定 tid 就只查它；否则拉最新 count 条。评论数放在说说列表里是现成的，
+      // 详情里的 commentlist 才是"谁说了什么"。
+      let posts;
+      if (args.tid) {
+        if (!String(args.tid).trim()) throw new Error('tid 不能是空白。');
+        posts = [{ tid: String(args.tid).trim() }];
+      } else {
+        const list = await onebot('get_qzone_msg_list', { num: count, pos: 0 });
+        posts = Array.isArray(list?.msglist) ? list.msglist.slice(0, count) : [];
+      }
+      if (!posts.length) return ok('空间里暂时没有说说，自然也没有评论。');
+
+      // 登录态：get_cookies 是标准 action；g_tk 与请求拼装在 qzone-web.mjs（照抄 SnowLuma）。
+      const cookieRes = await onebot('get_cookies', { domain: 'qzone.qq.com' });
+      const cookieStr = String(cookieRes?.cookies ?? '');
+      if (!cookieStr) throw new Error('拿不到 qzone.qq.com 的登录 Cookie（get_cookies 返回空），没法读评论。');
+      const login = await onebot('get_login_info');
+      const selfUin = login?.user_id;
+      if (selfUin === undefined || selfUin === null) {
+        throw new Error('拿不到自己的 QQ 号（get_login_info），没法读评论');
+      }
+
+      const lines = [];
+      let totalComments = 0;
+      for (const post of posts) {
+        let block;
+        try {
+          const detail = await fetchQzoneMsgDetail({ cookieStr, uin: selfUin, tid: post.tid });
+          const comments = extractQzoneComments(detail);
+          totalComments += comments.length;
+          const summary = String(post.content ?? detail?.content ?? '').slice(0, 30);
+          if (!comments.length) {
+            block = `· 「${summary}${summary.length >= 30 ? '…' : ''}」（tid=${post.tid}）：还没有评论`;
+          } else {
+            const rendered = comments
+              .map((c) => {
+                const head = `  - ${c.nick || c.uin || '（匿名）'}：${c.content}`;
+                const replies = c.replies.map((r) => `      ↳ ${r.nick || r.uin}：${r.content}`);
+                return [head, ...replies].join('\n');
+              })
+              .join('\n');
+            block = `· 「${summary}${summary.length >= 30 ? '…' : ''}」（tid=${post.tid}，${comments.length} 条评论）：\n${rendered}`;
+          }
+        } catch (error) {
+          // 单条失败不拖垮整体：标记后继续下一条。
+          block = `· tid=${post.tid}：这次没读到（${String(error?.message ?? error).slice(0, 120)}）`;
+        }
+        lines.push(block);
+      }
+      if (!totalComments) {
+        return ok(`最近 ${posts.length} 条说说都还没有评论。\n${lines.join('\n')}`);
+      }
+      return ok(`空间评论如下（共 ${totalComments} 条）：\n${lines.join('\n')}`);
+    }
+
+    case 'qq_comment_qzone': {
+      assertCapability('qzone');
+      const tid = String(args.tid ?? '').trim();
+      if (!tid) throw new Error('tid 不能为空：要评论哪条说说？');
+      const content = String(args.content ?? '').trim();
+      if (!content) throw new Error('content 不能为空：评论正文必填。');
+      if (content.length > MAX_QZONE_COMMENT_CHARS) {
+        throw new Error(`评论太长：${content.length} 字，上限 ${MAX_QZONE_COMMENT_CHARS}（QQ_MAX_QZONE_COMMENT_CHARS 可调）。`);
+      }
+      const images = args.images ?? [];
+      if (!Array.isArray(images) || images.some((img) => typeof img !== 'string' || !img.trim())) {
+        throw new Error('images 必须是非空字符串数组（file:// http:// base64://）。');
+      }
+      const targetUin =
+        args.target_uin === undefined || args.target_uin === null || args.target_uin === ''
+          ? null
+          : Number(args.target_uin);
+      if (targetUin !== null && (!Number.isSafeInteger(targetUin) || targetUin <= 0)) {
+        throw new Error(`target_uin 必须是正整数 QQ 号，收到 ${args.target_uin}。`);
+      }
+
+      // 失败也算一次 —— 同发说说的原则。
+      consumeQuota('mcp:qzcomment:d', 24 * 3600_000, QUOTA.qzoneCommentPerDay, '发空间评论每天');
+
+      const payload = { tid, content };
+      if (targetUin !== null) payload.target_uin = targetUin;
+      if (images.length) payload.images = images.map((img) => img.trim());
+      const written = await onebot('comment_qzone', payload);
+      const commentId =
+        written?.commentId ?? written?.id ?? written?.cid ?? (typeof written === 'string' ? written : null);
+
+      /**
+       * 回读核实（尽力而为）：comment_qzone 的评论 id 是"尽力而为"返回的，
+       * 而 SnowLuma 的 qzone 层报错会抛——所以"没抛"基本等于发出去了，
+       * 回读只是把"确实挂上去了"说死。失败不装成功也不报失败。
+       */
+      let confirmed = false;
+      try {
+        const cookieRes = await onebot('get_cookies', { domain: 'qzone.qq.com' });
+        const detail = await fetchQzoneMsgDetail({
+          cookieStr: String(cookieRes?.cookies ?? ''),
+          uin: targetUin ?? (await onebot('get_login_info'))?.user_id,
+          tid,
+        });
+        const comments = extractQzoneComments(detail);
+        confirmed = comments.some((c) => c.content === content || c.replies.some((r) => r.content === content));
+      } catch (error) {
+        log(`⚠ 评论回读失败（不当作失败）：${error?.message ?? error}`);
+      }
+
+      const scope = targetUin !== null ? `好友 ${targetUin} 的说说` : '自己的说说';
+      return ok(
+        `已评论${scope}（tid=${tid}）${commentId ? `，评论 id=${commentId}` : ''}。` +
+          (confirmed ? '\n（回读确认：评论已经挂在说说了。）' : unverified('评论列表')),
       );
     }
 

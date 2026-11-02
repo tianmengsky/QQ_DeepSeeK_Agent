@@ -517,7 +517,8 @@ check("SnowLuma 数字表情类型也识别", renderMessage([{ type: "image", da
     wantAttach: true,
   });
   check("想看却没取到时才说明", wanted.includes("图没能取到"), true);
-  check("未取得像素时仅按文字并保留未加载事实", wanted.includes("仅按文字理解") && wanted.includes("等取得像素后再描述"), true);
+  // 钉行为不钉措辞：没拿到像素时，材料必须①只说按文字理解②不许假装看见了。
+  check("未取得像素时仅按文字、且不许假装看见了", wanted.includes("仅按文字理解") && wanted.includes("不假装"), true);
 
   const read = buildPrompt(ev([img("偷笑")]), c, {
     imagePresent: true,

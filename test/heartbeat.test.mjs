@@ -458,6 +458,42 @@ try {
     assert.match(idle.error, /没有待处理/);
     assert.equal(pokeHeartbeat({ entry: () => null }, 'group:1').ok, false, '不存在的会话要说清楚');
   });
+  await test('心跳回合把整批当成"现在"，而不是只对最后一条作答', async () => {
+    let speak = false;
+    const r = make({}, {
+      async *stream() { yield { type: 'text-delta', text: `{"speak":${speak}}` }; },
+    });
+    // 第一批判不插，留成"更早的历史"
+    for (let i = 0; i < 6; i++) await r.post(message(1 + i, '旧话' + i));
+    // 第二批才是这一轮要接的话题
+    speak = true;
+    for (let i = 0; i < 6; i++) await r.post(message(20 + i, '话题' + i));
+    assert.equal(await r.sendQueue.flush(), true);
+    const text = r.prompts.at(-1).content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+    const cut = text.lastIndexOf('他们刚聊到的这一批');
+    assert.ok(cut > 0, '心跳的「现在」段要按整批渲染');
+    assert.equal(text.includes('要回应的是这一条'), false, '心跳不是"回应这一条"');
+    const now = text.slice(cut), history = text.slice(0, cut);
+    for (let i = 0; i < 6; i++) {
+      assert.equal(now.split('话题' + i).length - 1, 1, '这一批每一条都要在「现在」段里：话题' + i);
+      assert.equal(history.includes('话题' + i), false, '这一批不能再在聊天记录里重复：话题' + i);
+    }
+    assert.ok(history.includes('旧话'), '更早的对话仍作为历史存在');
+    assert.deepEqual(r.registry.entry('group:10').pending, []);
+  });
+  await test('只有一条未读时心跳仍按单条消息渲染，不会伪造一批', async () => {
+    const r = make({}, {
+      async *stream() { yield { type: 'text-delta', text: '{"speak":true}' }; },
+    });
+    await r.post(message(1, '唯一一条未读'));
+    await pokeHeartbeat(r.registry, 'group:10');
+    await runHeartbeat(r.ctx, r.config, r.registry, r.state, null, r.stats);
+    assert.equal(await r.sendQueue.flush(), true);
+    const text = r.prompts.at(-1).content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+    assert.ok(text.includes('现在这条消息'));
+    assert.equal(text.includes('他们刚聊到的这一批'), false);
+    assert.equal(text.split('唯一一条未读').length - 1, 1);
+  });
   console.log(`${passed} passed, 0 failed`);
 } finally {
   for (const r of rigs) r.state.persistEnabled(false);

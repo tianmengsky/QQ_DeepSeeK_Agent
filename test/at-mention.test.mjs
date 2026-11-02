@@ -597,6 +597,82 @@ await test('提示词：优先写昵称，号只能照抄，别每句都带', as
   assert.match(prompt, /确需点名时/, '点名由实际需要决定');
 });
 
+/**
+ * 2026-11-02 线上重放（群 946719566，17:42）：
+ * 她写的是 `[ @好运成双倍 ] 那你告诉告诉我嘛` —— 方括号里带了空格。
+ * 主正则本来就容忍 `\[\s*@`，可"这段里有没有 @"的快路径写的是 `includes('[@')`，
+ * 于是整段跳过了 @ 处理：**标记既没变成 at 段、也没被摘掉，原样进了群**。
+ */
+await test('方括号里带空格（[ @昵称 ]）也必须认，绝不能漏成正文', async () => {
+  const calls = fakeOnebot();
+  const stats = {};
+  await bridge.__test.deliverReply(
+    fakeCtx(),
+    baseConfig(),
+    groupOpts('『[ @大肥鱼 ] 那你告诉告诉我嘛』', { stats }),
+  );
+  const [message] = sent(calls);
+  assert.ok(Array.isArray(message), '带空格也是 @，必须走消息段');
+  assert.deepEqual(message[0], { type: 'at', data: { qq: FISH } });
+  assert.ok(!JSON.stringify(message).includes('[@'), '标记语法不许进群');
+  assert.ok(!JSON.stringify(message).includes('[ @'), '带空格的标记也不许进群');
+  assert.equal(stats.atMentions, 1);
+});
+
+/**
+ * 2026-10-27 换 『』 协议之后，框外的一切都被丢掉 —— 包括她写在气泡外面的 @。
+ * 线上从那天起再没有一条带 at 段的消息，就是这条规则吃掉的。
+ * 现在的分界：框外的**文字**照旧丢，框外的**标记**搬进最近的气泡。
+ */
+await test('@ 写在 『』 外面 → 搬进气泡，而不是消失', async () => {
+  const cases = [
+    `[@大肥鱼]『你说啥』`,           // 摆在第一条前面
+    `『先说一句』[@大肥鱼]『你说啥』`, // 夹在两条中间，紧贴着后一条
+    `『先说一句』\n\n[@大肥鱼]`,       // 只有标记，冲后的那条靠
+  ];
+  for (const reply of cases) {
+    const calls = fakeOnebot();
+    await bridge.__test.deliverReply(fakeCtx(), baseConfig(), groupOpts(reply));
+    const all = sent(calls);
+    const flat = JSON.stringify(all);
+    assert.ok(!flat.includes('[@'), `标记不许漏进群：${reply} → ${flat}`);
+    assert.ok(
+      all.some((m) => Array.isArray(m) && m.some((p) => p.type === 'at' && p.data.qq === FISH)),
+      `框外的 @ 应该变成 at 段：${reply} → ${flat}`,
+    );
+  }
+});
+
+await test('框外的排稿文字仍然一个字都不发（只搬标记）', async () => {
+  const calls = fakeOnebot();
+  await bridge.__test.deliverReply(
+    fakeCtx(),
+    baseConfig(),
+    groupOpts('两气泡：\n[@大肥鱼]『？你这比喻……』\n『行吧』\n配 #67。'),
+  );
+  const all = sent(calls);
+  assert.equal(all.length, 2, `只该发两条气泡，实际 ${all.length}`);
+  assert.ok(!JSON.stringify(all).includes('两气泡'), '排稿说明不许进群');
+  assert.ok(!JSON.stringify(all).includes('配 #67'), '排稿说明不许进群');
+});
+
+await test('提示词：叫她把握法写进气泡里，别摆在框外', async () => {
+  const prompt = bridge.__test.buildPrompt(
+    {
+      post_type: 'message',
+      message_type: 'group',
+      group_id: 999001,
+      user_id: Number(DREAM),
+      self_id: Number(BOT),
+      message: [{ type: 'text', data: { text: '在吗' } }],
+      sender: { nickname: '天梦' },
+    },
+    baseConfig(),
+    { includeStatic: false },
+  );
+  assert.match(prompt, /写在那个气泡的『』里面/, '位置比写法更容易踩，必须写清楚');
+});
+
 globalThis.fetch = realFetch;
 
 console.log(`\n${passed} passed, ${failed} failed`);

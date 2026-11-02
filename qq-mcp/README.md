@@ -100,6 +100,12 @@
 | `QQ_QUOTA_VOICE_PER_HOUR` | `10` | 每个群每小时 AI 语音上限，0=不限 |
 | `QQ_AI_VOICE_CHARACTER` | `lucy-voice-f38` | 固定 AI 语音角色 ID（傲娇少女）；只由部署方改，模型无接口 |
 | `QQ_AI_VOICE_NAME` | `傲娇少女` | 回执里显示的音色名，与上面一起改 |
+| `QQ_MAX_QZONE_CHARS` | `2000` | 说说正文上限 |
+| `QQ_QUOTA_QZONE_PER_DAY` | `0` | 发说说每天上限，0=不限（2026-11-01 起全部限流默认归零） |
+| `QQ_MAX_QZONE_COMMENT_CHARS` | `500` | 空间评论正文上限 |
+| `QQ_QUOTA_QZONE_COMMENT_PER_DAY` | `0` | 发空间评论每天上限，0=不限 |
+| `QQ_QUOTA_QZONE_READ_PER_DAY` | `0` | 读空间评论每天上限，0=不限 |
+| `QQ_QZONE_H5_BASE` | `https://h5.qzone.qq.com` | 空间 web 代理基地址（读评论直调；仅测试时改） |
 
 **建议至少配一个白名单。** 不限制意味着 Agent 能给任何好友/群发消息。
 
@@ -117,6 +123,7 @@
 | `read_forward` | `qq_read_forward` 分页读取本轮消息或其引用消息中的合并转发 |
 | `manage_group` | 群管理（禁言/踢人/改名/改名片/发·删公告）+ 撤回 |
 | `set_profile` | 改**自己**的昵称 / 个性签名（账号级；老配置里的 `manage_group` 也认）|
+| `qzone` | **自己**的 QQ 空间：发表说说（`qq_post_qzone`）、读说说评论（`qq_read_qzone_comments`，经 get_cookies 直调 msgdetail_v6）、评论/回复说说（`qq_comment_qzone`，自己或好友的空间）。删除说说/改权限是二期 |
 | `poke` | 戳一戳 |
 | `read_requests` | 查看待处理的加好友 / 入群申请（**只读**） |
 | `handle_request` | 同意 / 拒绝申请（**放陌生人进来，风险最高**） |

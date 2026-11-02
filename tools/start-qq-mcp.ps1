@@ -17,6 +17,12 @@ param(
   [string]$Token = '',
   [string]$BridgeToken = ''
 )
+# 中文输出统一走 UTF-8。
+# PowerShell 的 Write-Host 默认按系统 OEM 编码（简体中文是 936/GBK）写管道，
+# 而控制台（node）按 UTF-8 读 —— 不设这里，job 日志里就是乱码。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 $ErrorActionPreference = 'Stop'
 $SnowLumaDir = [System.IO.Path]::GetFullPath($SnowLumaDir)
 

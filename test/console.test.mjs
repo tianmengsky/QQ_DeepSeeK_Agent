@@ -9,6 +9,9 @@
  * 端口与子进程全部由假实现代替 —— 测试里绝不能真启动 DSH 或改线上托管。
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import http from 'node:http';
 
 import {
@@ -21,6 +24,7 @@ import {
   parseTasklist,
   probe,
   readConfig,
+  runPowerShell,
 } from '../tools/console.mjs';
 
 let passed = 0;
@@ -238,6 +242,61 @@ await test('口令：配了 QQ_CONSOLE_TOKEN 就必须带，页面正文不下�
     assert.match(page, /id="start-all"/, '页面能打开，且带得动按钮');
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+
+/**
+ * 2026-11-02 的事故：`start-qq-mcp.ps1` 每一步都打印了成功（"托管=True"），控制台却
+ * 报"超过 240 秒没有结束"。原因是判定等的是**管道 EOF**，而脚本用 `Start-Process`
+ * 起的 QQ / SnowLuma 会继承 stdout —— 脚本早就退了，管道一直开着。
+ *
+ * 这里造一份"起了长命子进程然后立刻退出"的脚本，验证我们看的是进程 exit。
+ */
+await test('跑脚本看进程 exit，不等管道 EOF（被别人继承 stdout 也不能卡住）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-console-wait-'));
+  const script = path.join(dir, 'spawn-holder.ps1');
+  // 子进程活 4 秒、继承 stdout；父脚本说完一句就退。
+  // 断言"3 秒内就返回"，说明判定看的是进程 exit 而不是管道 EOF（旧实现要等满 4 秒）。
+  fs.writeFileSync(script, [
+    "Write-Output 'parent-ok'",
+    "$p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 4' -WorkingDirectory $env:TEMP -PassThru",
+    "Write-Output ('child=' + $p.Id)",
+    "exit 0",
+  ].join('\r\n'), 'utf8');
+  const lines = [];
+  const started = Date.now();
+  let holderPid = 0;
+  try {
+    await runPowerShell(script, [], { cwd: dir, onLine: (line) => lines.push(line), timeout: 20000 });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 3000, `应该在子进程还活着时就返回，实际用了 ${elapsed}ms`);
+    assert.ok(lines.includes('parent-ok'), '正常输出不能被吞掉');
+    const holder = lines.find((line) => /^child=\d+$/.test(line));
+    assert.ok(holder, '子进程 pid 那行也要读到');
+    holderPid = Number(holder.split('=')[1]);
+  } finally {
+    // 收工：把还活着的子进程结束掉，别让它拖着临时目录 4 秒（会让清理 EBUSY）。
+    if (holderPid) { try { process.kill(holderPid); } catch { /* 已经自己退了 */ } }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 临时目录而已 */ }
+  }
+});
+
+await test('超时消息要说清"没有结束"，便于排查', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-console-timeout-'));
+  const script = path.join(dir, 'sleep.ps1');
+  fs.writeFileSync(script, "Start-Sleep 30\r\nexit 0\r\n", 'utf8');
+  try {
+    await assert.rejects(
+      () => runPowerShell(script, [], { cwd: dir, timeout: 1500 }),
+      (error) => {
+        assert.match(error.message, /没有结束/);
+        return true;
+      },
+    );
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 同上 */ }
   }
 });
 
